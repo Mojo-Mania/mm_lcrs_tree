@@ -26,16 +26,35 @@ def assert_indices(actual: List[Int], expected: List[Int]) raises:
 
 
 def assert_consistent(tree: LCRSTree[Int]) raises:
-    """Every reachable node's children must point back at it, and the sibling
-    chains must terminate."""
+    """Checks the invariants every structural change has to preserve.
+
+    Children agree with their parent, node 0 is the only root, the reachable
+    node count matches `len()`, and the cached tail of each child chain is the
+    node the chain actually ends at.
+    """
     var seen = 0
     for node in tree.dfs():
         seen += 1
+        var last = -1
         for child in tree.children(node):
             assert_equal(
                 tree.parent_of(child),
                 node,
                 String("child ", child, " disagrees about its parent"),
+            )
+            last = child
+        var cached = Int(tree._last_child[node])
+        if last == -1:
+            assert_equal(
+                cached,
+                node,
+                String("node ", node, " caches a tail but has no children"),
+            )
+        else:
+            assert_equal(
+                cached,
+                last,
+                String("node ", node, " has a stale last_child"),
             )
         if tree.is_root(node):
             assert_equal(node, 0)
@@ -274,6 +293,110 @@ def test_remove_root_empties_the_tree() raises:
     assert_equal(added, 1)
     assert_equal(tree[added], 42)
     assert_equal(len(tree), 2)
+    assert_consistent(tree)
+
+
+# ===-----------------------------------------------------------------------===#
+# Appending stays correct as the shape changes
+#
+# `add_child` appends through a cached tail pointer rather than walking the
+# sibling chain, so every operation that can change which node ends a chain has
+# to maintain it. These pin that down; `assert_consistent` checks the cached
+# tail against the real chain for every node.
+# ===-----------------------------------------------------------------------===#
+
+
+def test_append_keeps_order_when_wide() raises:
+    var tree = LCRSTree[Int](0)
+    for i in range(1000):
+        _ = tree.add_child(i)
+    var seen = List[Int]()
+    for child in tree.children(0):
+        seen.append(tree[child])
+    assert_equal(len(seen), 1000)
+    for i in range(1000):
+        assert_equal(seen[i], i)
+    assert_consistent(tree)
+
+
+def test_append_after_removing_last_child() raises:
+    var tree = sample()
+    tree.remove(3)
+    var added = tree.add_child(30)
+    assert_indices(tree.children_indices(0), [1, 2, added])
+    assert_consistent(tree)
+
+
+def test_append_after_removing_only_child() raises:
+    var tree = sample()
+    tree.remove(6)
+    assert_true(tree.is_leaf(3))
+    var added = tree.add_child(60, 3)
+    assert_indices(tree.children_indices(3), [added])
+    assert_consistent(tree)
+
+
+def test_append_after_removing_first_of_two() raises:
+    var tree = sample()
+    tree.remove(4)
+    var added = tree.add_child(40, 1)
+    assert_indices(tree.children_indices(1), [5, added])
+    assert_consistent(tree)
+
+
+def test_append_after_swap() raises:
+    var tree = sample()
+    assert_true(tree.swap_nodes(1, 3))
+    var added = tree.add_child(70)
+    assert_indices(tree.children_indices(0), [3, 2, 1, added])
+    assert_consistent(tree)
+
+
+def test_append_after_swapping_the_last_child() raises:
+    var tree = sample()
+    assert_true(tree.swap_nodes(3, 4))
+    var added = tree.add_child(80)
+    assert_indices(tree.children_indices(0), [1, 2, 4, added])
+    assert_consistent(tree)
+
+
+def test_append_after_prepend_root() raises:
+    var tree = sample()
+    var moved = tree.prepend_root(99)
+    var added = tree.add_child(90, moved)
+    assert_indices(tree.children_indices(moved), [1, 2, 3, added])
+    assert_consistent(tree)
+
+
+def test_append_after_add_tree() raises:
+    var tree = sample()
+    var other = LCRSTree[Int](100)
+    _ = other.add_child(101)
+    var grafted = tree.add_tree(other)
+    var added = tree.add_child(102, grafted)
+    assert_indices(tree.children_indices(grafted), [grafted + 1, added])
+    assert_consistent(tree)
+
+
+def test_append_after_compaction() raises:
+    var tree = sample()
+    tree.remove(2)
+    tree.compact_dfs()
+    var added = tree.add_child(20)
+    assert_equal(tree[added], 20)
+    var elements = List[Int]()
+    for child in tree.children(0):
+        elements.append(tree[child])
+    assert_indices(elements, [1, 3, 20])
+    assert_consistent(tree)
+
+
+def test_append_reusing_a_freed_slot() raises:
+    var tree = sample()
+    tree.remove(1)
+    var first = tree.add_child(10)
+    var second = tree.add_child(11)
+    assert_indices(tree.children_indices(0), [2, 3, first, second])
     assert_consistent(tree)
 
 

@@ -5,17 +5,18 @@
 An n-ary tree for [Mojo](https://mojolang.org), stored as left-child /
 right-sibling links in parallel arrays.
 
-Every node keeps exactly two links — its **first child** and its **next
-sibling** — which encodes a tree of arbitrary arity as a binary one. A node's
-children are its first child followed by that child's sibling chain, so a node
-costs the same whether it has one child or a thousand, and no node owns a list.
-The price is that reaching the k-th child is O(k).
+Every node keeps two tree links — its **first child** and its **next sibling** —
+which encodes a tree of arbitrary arity as a binary one. A node's children are
+its first child followed by that child's sibling chain, so a node costs the same
+whether it has one child or a thousand, and no node owns a list. The price is
+that reaching the k-th child is O(k).
 
 Nodes live in `List`s and are addressed by index; a link pointing at its own
 node means "none", so no index value is reserved as a sentinel. Alongside the
 two tree links this implementation keeps a `parent` array — which makes upward
-walks, removal and node swaps possible — and a free list, so slots released by
-`remove` are reused.
+walks, removal and node swaps possible — a `last_child` array, which is the tail
+of each child chain and makes appending a child O(1), and a free list, so slots
+released by `remove` are reused.
 
 This is the 2023 `mojo-trees` experiment ported to current Mojo; see
 [`docs/migration.md`](docs/migration.md), which also covers the five
@@ -80,7 +81,7 @@ LCRSTree[Int, DType.uint16]     # quarter the link memory, 65535 nodes max
 | Member | Meaning |
 | --- | --- |
 | `LCRSTree[T](root)` | A tree always has a root, so it is never empty. |
-| `add_child(element, parent=0) -> Int` | Append as the last child. O(children of parent). |
+| `add_child(element, parent=0) -> Int` | Append as the last child, in constant time. |
 | `add_tree(other, parent=0) -> Int` | Graft a copy of another tree in. |
 | `prepend_root(element) -> Int` | Insert a new root above the current one. |
 | `remove(index)` | Drop a node and its subtree; slots go on the free list. |
@@ -102,18 +103,18 @@ Reproduce with `pixi run bench`.
 
 | Operation | LCRSTree | Nodes owning a `List` | `ArcPointer` nodes |
 | --- | --- | --- | --- |
-| build | **10.7** | 26.3 | 77.2 |
-| depth-first walk | 2.4 | 2.4 | **2.2** |
-| breadth-first walk | 4.1 | **1.4** | — |
+| build | **10.3** | 24.7 | 79.1 |
+| depth-first walk | 2.4 | **2.3** | 2.8 |
+| breadth-first walk | 4.0 | **1.4** | — |
 | enumerate all children | 1.5 | **0.8** | — |
-| bytes per node | **20** | 48 + an allocation per parent | a heap node + refcount each |
+| bytes per node | **24** | 48 + an allocation per parent | a heap node + refcount each |
 
 Where the shape is wide rather than bushy:
 
 | Operation (4000 direct children) | LCRSTree | Nodes owning a `List` |
 | --- | --- | --- |
-| build | 1224.2 | **7.2** |
-| read the k-th child | 2502.8 | **0.8** |
+| build | 12.2 | **7.1** |
+| read the k-th child | 2177.4 | **0.9** |
 
 Reading the tables:
 
@@ -125,10 +126,10 @@ Reading the tables:
   deep tree and allocates nothing.
 - **Breadth-first and child enumeration cost about 2× a child list**, which is
   the sibling chain doing its job.
-- **Wide fan-out is the weak spot.** `add_child` appends by walking to the end
-  of the sibling chain, so building one node with 4000 children is quadratic —
-  1224 ns per node against 7.2. There is a cheap fix, in
-  [`docs/improvements.md`](docs/improvements.md).
+- **Wide fan-out used to be the weak spot.** `add_child` appended by walking to
+  the end of the sibling chain, making a node with 4000 children quadratic to
+  build — 1224 ns per node. Caching the tail of each child chain in a
+  `last_child` array brought that to 12.2, at the cost of four bytes a node.
 - **Indexed child access is O(k) by design.** If you need the k-th child of a
   wide node in a loop, this is the wrong structure.
 - **`compact_dfs()` is worth calling** after a batch of removals: a depth-first
@@ -138,7 +139,7 @@ Reading the tables:
 ## Development
 
 ```bash
-pixi run test     # the test suite (39 tests)
+pixi run test     # the test suite (49 tests)
 pixi run bench    # the benchmarks above
 pixi run main     # the example
 pixi run format   # mojo format

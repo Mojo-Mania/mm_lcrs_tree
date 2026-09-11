@@ -1,12 +1,12 @@
 # Suggested improvements
 
-Ordered by effect on the numbers in the README. None of this is implemented;
-the port kept the original design apart from the five bug fixes in
-[`migration.md`](migration.md).
+Ordered by effect on the numbers in the README. Improvement 1 is **done**;
+the rest are proposals, and the port otherwise kept the original design apart
+from the five bug fixes in [`migration.md`](migration.md).
 
-## 1. Appending a child walks the whole sibling chain
+## 1. Appending a child walked the whole sibling chain — fixed
 
-`add_child` puts the new node last, and finding "last" means walking from the
+`add_child` puts the new node last, and finding "last" meant walking from the
 first child:
 
 ```mojo
@@ -14,20 +14,43 @@ while self.has_sibling(child):
     child = Int(self._right_sibling[child])
 ```
 
-So building a node with k children costs O(k²). Measured: a root with 4000
-direct children takes **1224 ns per node against a child-list tree's 7.2**.
-Bushy trees never notice, but a wide one — a directory with thousands of
-entries, a parse tree with a long argument list — falls off a cliff.
+Building a node with k children therefore cost O(k²): a root with 4000 direct
+children took **1224 ns per node against a child-list tree's 7.2**. Bushy trees
+never noticed, but a wide one — a directory with thousands of entries, a parse
+tree with a long argument list — fell off a cliff.
 
-**Fix: a `last_child` array.** One more index per node (4 bytes with the
-default `uint32`, taking a node from 20 to 24 bytes) makes the append O(1):
-point the current last child's sibling at the new node and update
-`last_child[parent]`. Everything else is unaffected, and `_append_child` is the
-only writer that has to maintain it.
+**The fix**, now implemented, is a `last_child` array holding the tail of each
+child chain. Appending points the current tail's sibling at the new node and
+updates the tail, both O(1):
 
-**Alternative without the memory:** offer `prepend_child`, which is already
-O(1), for callers that do not care about order. Cheap to add, but it changes
-the child order, so it cannot be the default.
+```mojo
+def _append_child(mut self, parent: Int, node: Int):
+    var last = Int(self._last_child[parent])
+    if last == parent:
+        self._left_child[parent] = Self.Index(node)
+    else:
+        self._right_sibling[last] = Self.Index(node)
+    self._last_child[parent] = Self.Index(node)
+```
+
+| build, one root with 4000 children | before | after |
+| --- | --- | --- |
+| LCRSTree | 1224.2 ns/node | **12.2 ns/node** |
+
+The bushy build is unchanged (10.3 ns/node), and a node grew from 20 to 24
+bytes — still half a child-list tree's 48 plus its per-parent allocation.
+
+The cost is that every operation which can change *which node ends a chain* now
+has to maintain the tail: `_append_child`, `_detach`, `prepend_root`,
+`add_tree`, `swap_nodes` and `_compact`. `assert_consistent` in the test suite
+checks the cached tail against the real chain for every node, and ten tests
+append after each of those operations.
+
+**Still open:** `remove` is O(k) regardless, because `_detach` calls
+`_previous_sibling` to find what precedes the node being removed. A
+`prev_sibling` array would make removal O(1) too, at another four bytes a node
+— worth it only for remove-heavy workloads, since it doubles the link
+maintenance surface.
 
 ## 2. Breadth-first traversal and child enumeration cost about 2×
 

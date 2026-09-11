@@ -9,8 +9,10 @@ k-th child.
 Nodes live in parallel `List`s and are addressed by index; a link that points at
 its own node means "none", so no index value has to be reserved as a sentinel.
 Alongside the two tree links this implementation keeps a `parent` array, which
-makes upward walks, removal and node swaps possible, and a free list, so slots
-released by `remove` are reused by later inserts.
+makes upward walks, removal and node swaps possible; a `last_child` array, which
+is the tail of each child chain and makes appending a child O(1) instead of a
+walk to the end; and a free list, so slots released by `remove` are reused by
+later inserts.
 
 ```mojo
 from mm_lcrs_tree import LCRSTree
@@ -57,6 +59,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
     """First child of every node; a node points at itself when it has none."""
     var _right_sibling: List[Self.Index]
     """Next sibling of every node; a node points at itself when it has none."""
+    var _last_child: List[Self.Index]
+    """Cached tail of each node's child chain, so appending is O(1); a node
+    points at itself when it has no children."""
     var _parent: List[Self.Index]
     """Parent of every node; the root points at itself."""
     var _free: List[Self.Index]
@@ -75,6 +80,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         self._elements = [root.copy()]
         self._left_child = [0]
         self._right_sibling = [0]
+        self._last_child = [0]
         self._parent = [0]
         self._free = []
 
@@ -348,7 +354,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
     # ===-------------------------------------------------------------------===#
 
     def add_child(mut self, element: Self.T, parent: Int = 0) -> Int:
-        """Appends a new node as the last child of `parent`.
+        """Appends a new node as the last child of `parent`, in constant time.
 
         Args:
             element: The element to store.
@@ -379,6 +385,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             self._right_sibling.append(
                 other._right_sibling[i] + Self.Index(offset)
             )
+            self._last_child.append(other._last_child[i] + Self.Index(offset))
             self._parent.append(other._parent[i] + Self.Index(offset))
         for i in range(len(other._free)):
             self._free.append(other._free[i] + Self.Index(offset))
@@ -405,15 +412,18 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         # close a cycle. Read the real child before claiming the slot.
         var had_child = not self.is_leaf(0)
         var first_child = Int(self._left_child[0])
+        var last_child = Int(self._last_child[0])
 
         var moved = self._claim_slot(old_root)
         if had_child:
             self._left_child[moved] = Self.Index(first_child)
+            self._last_child[moved] = Self.Index(last_child)
         self._right_sibling[moved] = Self.Index(moved)
         self._parent[moved] = 0
 
         self._elements[0] = element.copy()
         self._left_child[0] = Self.Index(moved)
+        self._last_child[0] = Self.Index(moved)
         self._right_sibling[0] = 0
         self._parent[0] = 0
 
@@ -437,6 +447,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             self._elements = [root_element^]
             self._left_child = [0]
             self._right_sibling = [0]
+            self._last_child = [0]
             self._parent = [0]
             self._free = []
             return
@@ -487,6 +498,8 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         var sibling_b = Int(self._right_sibling[b])
         var previous_a = self._previous_sibling(a)
         var previous_b = self._previous_sibling(b)
+        var last_a = Int(self._last_child[parent_a])
+        var last_b = Int(self._last_child[parent_b])
 
         # Unhook both, then hook each into the other's place. Order matters
         # when the two are siblings, so the incoming links are read first.
@@ -505,6 +518,14 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             self._right_sibling[b] = Self.Index(a)
         elif sibling_b == a:
             self._right_sibling[a] = Self.Index(b)
+
+        # Each node took the other's place, so a parent whose tail was one of
+        # them now ends with the other. When they are siblings only one of
+        # these fires, since both reads saw the same tail.
+        if last_a == a:
+            self._last_child[parent_a] = Self.Index(b)
+        if last_b == b:
+            self._last_child[parent_b] = Self.Index(a)
         return True
 
     def compact_dfs(mut self, root: Int = 0):
@@ -542,24 +563,25 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             self._elements.append(element.copy())
             self._left_child.append(Self.Index(index))
             self._right_sibling.append(Self.Index(index))
+            self._last_child.append(Self.Index(index))
             self._parent.append(Self.Index(index))
             return index
         var index = Int(self._free.pop())
         self._elements[index] = element.copy()
         self._left_child[index] = Self.Index(index)
         self._right_sibling[index] = Self.Index(index)
+        self._last_child[index] = Self.Index(index)
         self._parent[index] = Self.Index(index)
         return index
 
     def _append_child(mut self, parent: Int, node: Int):
-        """Hooks `node` on as the last child of `parent`."""
-        var child = Int(self._left_child[parent])
-        if child == parent:
+        """Hooks `node` on as the last child of `parent`, in constant time."""
+        var last = Int(self._last_child[parent])
+        if last == parent:
             self._left_child[parent] = Self.Index(node)
-            return
-        while self.has_sibling(child):
-            child = Int(self._right_sibling[child])
-        self._right_sibling[child] = Self.Index(node)
+        else:
+            self._right_sibling[last] = Self.Index(node)
+        self._last_child[parent] = Self.Index(node)
 
     def _previous_sibling(self, node: Int) -> Int:
         """Returns the sibling before `node`, or -1 if it is the first child."""
@@ -591,6 +613,11 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             self._right_sibling[previous] = Self.Index(
                 previous if sibling == index else sibling
             )
+        if Int(self._last_child[parent]) == index:
+            # The tail moved back to whatever preceded the detached node.
+            self._last_child[parent] = Self.Index(
+                parent if previous == -1 else previous
+            )
 
     @staticmethod
     def _remap(mapping: List[Int], old: Int, fallback: Int) -> Self.Index:
@@ -609,6 +636,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         var elements = List[Self.T](capacity=size)
         var left_child = List[Self.Index](capacity=size)
         var right_sibling = List[Self.Index](capacity=size)
+        var last_child = List[Self.Index](capacity=size)
         var parent = List[Self.Index](capacity=size)
 
         for new_index in range(size):
@@ -623,6 +651,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             right_sibling.append(
                 self._remap(mapping, Int(self._right_sibling[old]), new_index)
             )
+            last_child.append(
+                self._remap(mapping, Int(self._last_child[old]), new_index)
+            )
             parent.append(
                 self._remap(mapping, Int(self._parent[old]), new_index)
             )
@@ -630,6 +661,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         self._elements = elements^
         self._left_child = left_child^
         self._right_sibling = right_sibling^
+        self._last_child = last_child^
         self._parent = parent^
         self._free.clear()
 

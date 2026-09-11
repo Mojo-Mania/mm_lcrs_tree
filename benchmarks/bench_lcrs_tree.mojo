@@ -234,7 +234,7 @@ def bench_build_wide() raises:
 
     report("LCRSTree", per_node(measure(lcrs), WIDTH))
     report("ChildListTree", per_node(measure(child_list), WIDTH))
-    print("   (LCRSTree appends by walking the sibling chain: O(children))")
+    print("   (both append in constant time)")
 
 
 def bench_traversal() raises:
@@ -386,7 +386,7 @@ def report_memory() raises:
     var tree = build_lcrs(DEPTH, FANOUT)
     var nodes = len(tree)
     # Four arrays: one element plus three indices per node.
-    var lcrs_bytes = nodes * (8 + 3 * 4)
+    var lcrs_bytes = nodes * (8 + 4 * 4)
     # Elements, parents, and a List header per node, plus its child slots.
     var list_bytes = nodes * (8 + 8 + 24 + 8)
     print("")
