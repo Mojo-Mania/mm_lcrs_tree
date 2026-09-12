@@ -173,10 +173,15 @@ remove sits far along the chain.
 | `tree[i]` | A **reference** to the element: no copy on read, mutable in place, and `tree[i] = x` assigns through it. |
 | `len(tree)`, `capacity()` | Live nodes, slot count. |
 | `for index in tree` / `tree.dfs(root=0)` | Depth-first preorder; uses parent links, so no stack and no recursion. |
+| `tree.postorder(root=0)` | Children before parents — what evaluation, layout and bottom-up folding want. Also stack-free. |
 | `tree.bfs(root=0)` | Breadth-first. |
+| `tree.leaves(root=0)` | Just the childless nodes. |
 | `tree.children(index)` | A node's children, without allocating. |
-| `get_dfs_indices()`, `get_bfs_indices()`, `children_indices()`, `ancestor_indices()` | The same as lists. |
-| `children_count()`, `depth()`, `parent_of()` | O(children), O(depth), O(1). |
+| `get_dfs_indices()`, `get_postorder_indices()`, `get_bfs_indices()`, `children_indices()`, `ancestor_indices()` | The same as lists. |
+| `children_count()`, `depth()`, `parent_of()`, `subtree_size()` | O(children), O(depth), O(1), O(subtree). |
+| `first_child()`, `next_sibling()` | The raw links, `-1` for none, for writing your own walks. |
+| `insert_child_at(parent, k, x)`, `insert_before(sibling, x)`, `insert_after(sibling, x)` | Ordered insertion, not just append. |
+| `move_node(node, new_parent) -> Bool` | Re-parent a node with its subtree; refuses cycles and the root. |
 | `is_leaf/is_root/has_sibling/are_siblings/is_free` | Shape predicates; `is_free` reports a released slot. |
 | `swap_elements(a, b)` / `swap_nodes(a, b) -> Bool` | Exchange contents / exchange nodes with their subtrees. Also O(siblings) unless backward links are on. |
 | `compact_dfs(root=0)` / `compact_bfs(root=0)` | Renumber into traversal order, dropping free slots. |

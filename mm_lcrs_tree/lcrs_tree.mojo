@@ -399,6 +399,46 @@ struct LCRSTree[
         var first = self._left(index)
         return {src = Pointer(to=self), node = -1 if first == index else first}
 
+    def first_child(self, index: Int) -> Int:
+        """Returns the node's first child, or -1 if it has none.
+
+        Args:
+            index: The node index.
+
+        Returns:
+            The first child's index, or -1.
+        """
+        var child = self._left(index)
+        return -1 if child == index else child
+
+    def next_sibling(self, index: Int) -> Int:
+        """Returns the node that follows this one, or -1 if none does.
+
+        Args:
+            index: The node index.
+
+        Returns:
+            The next sibling's index, or -1.
+        """
+        var sibling = self._right(index)
+        return -1 if sibling == index else sibling
+
+    def subtree_size(self, index: Int) -> Int:
+        """Returns how many nodes the subtree at `index` holds, itself included.
+
+        Walks the subtree, so this is O(size of the subtree).
+
+        Args:
+            index: The subtree root.
+
+        Returns:
+            The node count.
+        """
+        var count = 0
+        for _ in self.dfs(index):
+            count += 1
+        return count
+
     def dfs(
         self, root: Int = 0
     ) -> _DfsIter[
@@ -448,6 +488,62 @@ struct LCRSTree[
         """
         return {src = Pointer(to=self), root = 0}
 
+    def postorder(
+        self, root: Int = 0
+    ) -> _PostIter[
+        Self.T,
+        Self.I,
+        Self.track_previous_sibling,
+        Self.growth_percent,
+        origin_of(self),
+    ]:
+        """Returns an iterator that visits children before their parent.
+
+        This is the order most tree-shaped work wants -- evaluating, laying
+        out, folding upwards, freeing -- and like `dfs` it walks on the parent
+        links, so it allocates nothing and cannot overflow on a deep tree.
+
+        Args:
+            root: The node to start from; its subtree is what gets visited.
+
+        Returns:
+            An iterator yielding node indices, `root` last.
+        """
+        return {src = Pointer(to=self), root = root}
+
+    def leaves(
+        self, root: Int = 0
+    ) -> _LeafIter[
+        Self.T,
+        Self.I,
+        Self.track_previous_sibling,
+        Self.growth_percent,
+        origin_of(self),
+    ]:
+        """Returns an iterator over the subtree's leaves, in depth-first order.
+
+        Args:
+            root: The node to start from.
+
+        Returns:
+            An iterator yielding the indices of childless nodes.
+        """
+        return {src = Pointer(to=self), root = root}
+
+    def get_postorder_indices(self, root: Int = 0) -> List[Int]:
+        """Returns every node of a subtree, children before parents.
+
+        Args:
+            root: The node to start from.
+
+        Returns:
+            The node indices in visit order.
+        """
+        var result = List[Int]()
+        for index in self.postorder(root):
+            result.append(index)
+        return result^
+
     def get_dfs_indices(self, root: Int = 0) -> List[Int]:
         """Returns every node of a subtree in depth-first (preorder) order.
 
@@ -475,6 +571,23 @@ struct LCRSTree[
         for index in self.bfs(root):
             result.append(index)
         return result^
+
+    @always_inline
+    def _deepest_first(self, node: Int) -> Int:
+        """Descends to the first leaf under `node`, which postorder visits."""
+        var current = node
+        while not self.is_leaf(current):
+            current = self._left(current)
+        return current
+
+    @always_inline
+    def _post_successor(self, node: Int, root: Int) -> Int:
+        """Returns the next node in postorder within `root`'s subtree, or -1."""
+        if node == root:
+            return -1
+        if self.has_sibling(node):
+            return self._deepest_first(self._right(node))
+        return self._parent_of_raw(node)
 
     @always_inline
     def _dfs_successor(self, node: Int, root: Int) -> Int:
@@ -597,6 +710,112 @@ struct LCRSTree[
             True if the slot holds no live node.
         """
         return index != 0 and self._parent_of_raw(index) == index
+
+    def insert_after(mut self, sibling: Int, element: Self.T) -> Int:
+        """Inserts a new node directly after `sibling`, among its siblings.
+
+        Args:
+            sibling: The node to insert after. It must not be the root, which
+                has no siblings.
+            element: The element to store.
+
+        Returns:
+            The index of the new node, or -1 if `sibling` is the root.
+        """
+        if self.is_root(sibling):
+            return -1
+        var node = self._claim_slot(element)
+        self._insert_after_sibling(sibling, node)
+        return node
+
+    def insert_before(mut self, sibling: Int, element: Self.T) -> Int:
+        """Inserts a new node directly before `sibling`, among its siblings.
+
+        Args:
+            sibling: The node to insert before. It must not be the root, which
+                has no siblings.
+            element: The element to store.
+
+        Returns:
+            The index of the new node, or -1 if `sibling` is the root.
+        """
+        if self.is_root(sibling):
+            return -1
+        var parent = self._parent_of_raw(sibling)
+        var previous = self._previous_sibling(sibling)
+        var node = self._claim_slot(element)
+        if previous == -1:
+            self._insert_first(parent, node)
+        else:
+            self._insert_after_sibling(previous, node)
+        return node
+
+    def insert_child_at(
+        mut self, parent: Int, position: Int, element: Self.T
+    ) -> Int:
+        """Inserts a new node as `parent`'s child at `position`.
+
+        Positions past the end append, so `insert_child_at(p, len, x)` and
+        `add_child(x, p)` agree. Finding the position walks the sibling chain,
+        so this is O(position).
+
+        Args:
+            parent: The node to insert under.
+            position: Where among the children to put it, counting from zero.
+            element: The element to store.
+
+        Returns:
+            The index of the new node.
+        """
+        if position <= 0:
+            var first = self._claim_slot(element)
+            self._insert_first(parent, first)
+            return first
+
+        var previous = -1
+        var seen = 0
+        for child in self.children(parent):
+            previous = child
+            seen += 1
+            if seen == position:
+                break
+
+        var node = self._claim_slot(element)
+        if previous == -1:
+            self._insert_first(parent, node)
+        else:
+            self._insert_after_sibling(previous, node)
+        return node
+
+    def move_node(mut self, node: Int, new_parent: Int) -> Bool:
+        """Moves a node and its subtree to become the last child of another.
+
+        Args:
+            node: The node to move. It must not be the root.
+            new_parent: The node to move it under. It must not be inside
+                `node`'s own subtree, which would make a cycle.
+
+        Returns:
+            True if the node was moved.
+        """
+        if node == 0 or node == new_parent:
+            return False
+        if self.is_free(node) or self.is_free(new_parent):
+            return False
+        # Walking up from the destination must not reach the node being moved.
+        var ancestor = new_parent
+        while True:
+            if ancestor == node:
+                return False
+            if self.is_root(ancestor):
+                break
+            ancestor = self._parent_of_raw(ancestor)
+
+        self._detach(node)
+        self._set_right(node, node)
+        self._set_parent(node, new_parent)
+        self._append_child(new_parent, node)
+        return True
 
     def remove(mut self, index: Int):
         """Removes a node and its whole subtree.
@@ -881,6 +1100,33 @@ struct LCRSTree[
         comptime if Self.track_previous_sibling:
             self._set(Self._PREV, node, previous)
 
+    def _insert_first(mut self, parent: Int, node: Int):
+        """Hooks `node` on as the first child of `parent`."""
+        var first = self._left(parent)
+        self._set_parent(node, parent)
+        self._set_prev(node, node)
+        self._set_left(parent, node)
+        if first == parent:
+            self._set_right(node, node)
+            self._set_last(parent, node)
+        else:
+            self._set_right(node, first)
+            self._set_prev(first, node)
+
+    def _insert_after_sibling(mut self, sibling: Int, node: Int):
+        """Hooks `node` on directly after `sibling`."""
+        var parent = self._parent_of_raw(sibling)
+        var following = self._right(sibling)
+        self._set_parent(node, parent)
+        self._set_right(sibling, node)
+        self._set_prev(node, sibling)
+        if following == sibling:
+            self._set_right(node, node)
+            self._set_last(parent, node)
+        else:
+            self._set_right(node, following)
+            self._set_prev(following, node)
+
     def _previous_sibling(self, node: Int) -> Int:
         """Returns the sibling before `node`, or -1 if it is the first child."""
         comptime if Self.track_previous_sibling:
@@ -1102,6 +1348,137 @@ struct _DfsIter[
         var result = self._node
         self._node = self._src[]._dfs_successor(result, self._root)
         return result
+
+
+struct _PostIter[
+    mut: Bool,
+    //,
+    T: Copyable & Deinitable,
+    I: DType,
+    P: Bool,
+    G: Int,
+    origin: Origin[mut=mut],
+](ImplicitlyCopyable, Iterable, Iterator):
+    """Yields a subtree's node indices with children before their parent.
+
+    Parameters:
+        mut: Whether the borrow of the tree is mutable.
+        T: The element type of the tree.
+        I: The index type of the tree.
+        P: Whether the tree keeps backward sibling links.
+        G: The tree's growth percentage.
+        origin: The origin of the borrowed tree.
+    """
+
+    comptime Element = Int
+    comptime IteratorType[
+        iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
+    ]: Iterator = Self
+
+    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P, Self.G], Self.origin]
+    var _root: Int
+    var _node: Int
+
+    def __init__(
+        out self,
+        src: Pointer[LCRSTree[Self.T, Self.I, Self.P, Self.G], Self.origin],
+        root: Int,
+    ):
+        """Starts a postorder walk of the subtree at `root`.
+
+        Args:
+            src: The tree to walk.
+            root: The subtree root.
+        """
+        self._src = src
+        self._root = root
+        self._node = src[]._deepest_first(root) if root < src[]._count else -1
+
+    def __iter__(ref self) -> Self.IteratorType[origin_of(self)]:
+        """Returns this iterator.
+
+        Returns:
+            A copy of `self`.
+        """
+        return self.copy()
+
+    def __next__(mut self) raises StopIteration -> Int:
+        """Returns the next node, children before parents.
+
+        Raises:
+            StopIteration: When the subtree is exhausted.
+
+        Returns:
+            The next node index.
+        """
+        if self._node == -1:
+            raise StopIteration()
+        var result = self._node
+        self._node = self._src[]._post_successor(result, self._root)
+        return result
+
+
+struct _LeafIter[
+    mut: Bool,
+    //,
+    T: Copyable & Deinitable,
+    I: DType,
+    P: Bool,
+    G: Int,
+    origin: Origin[mut=mut],
+](ImplicitlyCopyable, Iterable, Iterator):
+    """Yields the childless nodes of a subtree, in depth-first order.
+
+    Parameters:
+        mut: Whether the borrow of the tree is mutable.
+        T: The element type of the tree.
+        I: The index type of the tree.
+        P: Whether the tree keeps backward sibling links.
+        G: The tree's growth percentage.
+        origin: The origin of the borrowed tree.
+    """
+
+    comptime Element = Int
+    comptime IteratorType[
+        iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
+    ]: Iterator = Self
+
+    var _inner: _DfsIter[Self.T, Self.I, Self.P, Self.G, Self.origin]
+
+    def __init__(
+        out self,
+        src: Pointer[LCRSTree[Self.T, Self.I, Self.P, Self.G], Self.origin],
+        root: Int,
+    ):
+        """Starts a walk of the leaves under `root`.
+
+        Args:
+            src: The tree to walk.
+            root: The subtree root.
+        """
+        self._inner = {src = src, root = root}
+
+    def __iter__(ref self) -> Self.IteratorType[origin_of(self)]:
+        """Returns this iterator.
+
+        Returns:
+            A copy of `self`.
+        """
+        return self.copy()
+
+    def __next__(mut self) raises StopIteration -> Int:
+        """Returns the next leaf.
+
+        Raises:
+            StopIteration: When the subtree is exhausted.
+
+        Returns:
+            The next childless node's index.
+        """
+        while True:
+            var node = self._inner.__next__()
+            if self._inner._src[].is_leaf(node):
+                return node
 
 
 struct _BfsIter[

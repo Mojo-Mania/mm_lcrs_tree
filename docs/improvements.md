@@ -75,6 +75,26 @@ build, because `_reserve` had grown big enough that its early return stopped
 inlining into `add_child`. Splitting it into an `@always_inline` check and a
 `@no_inline` `_grow` took the bushy build from 5.8 to 3.4 ns per node.
 
+### Postorder, leaves, and the editing operations
+
+Preorder and breadth-first were exposed; postorder was not, though it is what
+most tree-shaped work wants — evaluating, laying out, folding upwards, freeing.
+It walks on the parent links like `dfs()`, so it needs no stack and cannot
+overflow: a test walks a 50000-node chain. `leaves()` and `subtree_size()` came
+with it, along with `first_child()`/`next_sibling()` so callers can write their
+own walks.
+
+A tree could also only be built top-down and appended to. It now supports
+ordered insertion — `insert_child_at`, `insert_before`, `insert_after` — and
+`move_node`, which re-parents a node with its subtree and refuses to make a
+cycle or move the root. All of them maintain the cached tail and, when enabled,
+the backward links; the both-settings mutation exercise covers them, and every
+test ends in `assert_consistent`.
+
+A per-node subtree count would make `subtree_size` O(1) at four bytes a node,
+but it has to be maintained by every structural operation, so it waits until
+something needs it.
+
 ### Elements are borrowed, not copied
 
 `tree[i]` returns a reference, so reading a node whose element owns heap storage
@@ -128,33 +148,7 @@ do not free slots in address order.
 
 ## Open, most worthwhile first
 
-### 1. Postorder traversal, and the operations that need subtree sizes
-
-Preorder and breadth-first are exposed; postorder is not, and it is what most
-tree-shaped algorithms actually want — evaluation, layout, bottom-up folding,
-freeing. The parent links make it as stack-free as `dfs()`: descend to the
-leftmost leaf, then repeatedly take the next sibling's leftmost leaf, or climb.
-
-Alongside it, `subtree_size(index)` and `leaves()`. A per-node subtree count
-would make `subtree_size` O(1) at four bytes a node — but it has to be
-maintained by every structural operation, so it should wait until something
-needs it.
-
-This is the biggest gap between what the structure can do and what it exposes.
-
-### 2. Editing operations
-
-- `move_node(node, new_parent)` — a remove plus a rebuild today, though the
-  links to change are exactly the ones `swap_nodes` already touches.
-- `insert_child_at(parent, k, element)` and `insert_before/after(sibling)` —
-  ordered insertion, not just append. Anything DOM- or AST-shaped needs it.
-- `first_child(index)` / `next_sibling(index)` as public accessors, so callers
-  can write their own walks without going through `children()`.
-
-Each is a handful of lines against links that already exist, and each is a real
-hole: right now a tree can only be built top-down and appended to.
-
-### 3. A compaction policy
+### 1. A compaction policy
 
 After removing half the nodes, a depth-first walk costs 3.7 ns per node; after
 `compact_dfs()` it costs 1.3, and the slot array went from 37449 to 1365. That
@@ -167,7 +161,7 @@ holding goes stale. It cannot be silent. The honest shapes are a
 plus documentation. A generation counter on indices would make it safe to
 automate, and costs more than it is worth here.
 
-### 4. Smaller items
+### 2. Smaller items
 
 - **`shrink_to_fit`.** `remove` frees slots but never returns memory; only
   compaction does, and only as a side effect. Cheap now that the buffers are

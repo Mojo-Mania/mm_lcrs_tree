@@ -304,6 +304,158 @@ def test_dfs_on_deep_tree_does_not_recurse() raises:
     assert_equal(tree[last], 49_999)
 
 
+def test_postorder_visits_children_first() raises:
+    assert_indices(sample().get_postorder_indices(), [4, 5, 1, 2, 6, 3, 0])
+
+
+def test_postorder_of_a_subtree() raises:
+    assert_indices(sample().get_postorder_indices(1), [4, 5, 1])
+    assert_indices(sample().get_postorder_indices(3), [6, 3])
+    assert_indices(sample().get_postorder_indices(4), [4])
+
+
+def test_postorder_on_a_deep_chain_does_not_recurse() raises:
+    var tree = LCRSTree[Int](0, capacity=50_000)
+    var parent = 0
+    for i in range(1, 50_000):
+        parent = tree.add_child(i, parent)
+    var count = 0
+    var last = -1
+    for index in tree.postorder():
+        count += 1
+        last = index
+    assert_equal(count, 50_000)
+    assert_equal(last, 0, "the root is visited last")
+
+
+def test_leaves() raises:
+    var seen = List[Int]()
+    var tree = sample()
+    for index in tree.leaves():
+        seen.append(index)
+    assert_indices(seen, [4, 5, 2, 6])
+
+
+def test_leaves_of_a_leaf() raises:
+    var tree = sample()
+    var seen = List[Int]()
+    for index in tree.leaves(4):
+        seen.append(index)
+    assert_indices(seen, [4])
+
+
+def test_subtree_size() raises:
+    var tree = sample()
+    assert_equal(tree.subtree_size(0), 7)
+    assert_equal(tree.subtree_size(1), 3)
+    assert_equal(tree.subtree_size(3), 2)
+    assert_equal(tree.subtree_size(4), 1)
+
+
+def test_first_child_and_next_sibling() raises:
+    var tree = sample()
+    assert_equal(tree.first_child(0), 1)
+    assert_equal(tree.first_child(1), 4)
+    assert_equal(tree.first_child(4), -1)
+    assert_equal(tree.next_sibling(1), 2)
+    assert_equal(tree.next_sibling(3), -1)
+    assert_equal(tree.next_sibling(0), -1)
+
+
+# ===-----------------------------------------------------------------------===#
+# Ordered insertion and moving
+# ===-----------------------------------------------------------------------===#
+
+
+def test_insert_child_at_front() raises:
+    var tree = sample()
+    var added = tree.insert_child_at(0, 0, 99)
+    assert_indices(tree.children_indices(0), [added, 1, 2, 3])
+    assert_consistent(tree)
+
+
+def test_insert_child_at_middle() raises:
+    var tree = sample()
+    var added = tree.insert_child_at(0, 2, 99)
+    assert_indices(tree.children_indices(0), [1, 2, added, 3])
+    assert_consistent(tree)
+
+
+def test_insert_child_past_the_end_appends() raises:
+    var tree = sample()
+    var added = tree.insert_child_at(0, 99, 99)
+    assert_indices(tree.children_indices(0), [1, 2, 3, added])
+    assert_consistent(tree)
+
+
+def test_insert_child_of_a_leaf() raises:
+    var tree = sample()
+    var added = tree.insert_child_at(4, 0, 99)
+    assert_indices(tree.children_indices(4), [added])
+    assert_consistent(tree)
+
+
+def test_insert_before_and_after() raises:
+    var tree = sample()
+    var before = tree.insert_before(2, 98)
+    assert_indices(tree.children_indices(0), [1, before, 2, 3])
+    var after = tree.insert_after(3, 97)
+    assert_indices(tree.children_indices(0), [1, before, 2, 3, after])
+    assert_consistent(tree)
+
+
+def test_insert_before_the_first_child() raises:
+    var tree = sample()
+    var added = tree.insert_before(1, 98)
+    assert_indices(tree.children_indices(0), [added, 1, 2, 3])
+    assert_consistent(tree)
+
+
+def test_insert_around_the_root_is_rejected() raises:
+    var tree = sample()
+    assert_equal(tree.insert_before(0, 1), -1)
+    assert_equal(tree.insert_after(0, 1), -1)
+    assert_equal(len(tree), 7)
+    assert_consistent(tree)
+
+
+def test_move_node() raises:
+    var tree = sample()
+    assert_true(tree.move_node(1, 3))
+    assert_indices(tree.children_indices(0), [2, 3])
+    assert_indices(tree.children_indices(3), [6, 1])
+    assert_indices(
+        tree.children_indices(1),
+        [4, 5],
+    )
+    assert_equal(tree.depth(4), 3)
+    assert_consistent(tree)
+
+
+def test_move_node_to_the_same_parent_moves_it_last() raises:
+    var tree = sample()
+    assert_true(tree.move_node(1, 0))
+    assert_indices(tree.children_indices(0), [2, 3, 1])
+    assert_consistent(tree)
+
+
+def test_move_node_rejects_cycles_and_the_root() raises:
+    var tree = sample()
+    assert_false(tree.move_node(0, 1), "the root cannot move")
+    assert_false(tree.move_node(1, 4), "cannot move under own descendant")
+    assert_false(tree.move_node(1, 1), "cannot move under itself")
+    assert_indices(tree.children_indices(0), [1, 2, 3])
+    assert_consistent(tree)
+
+
+def test_move_node_rejects_freed_nodes() raises:
+    var tree = sample()
+    tree.remove(1)
+    assert_false(tree.move_node(4, 3))
+    assert_false(tree.move_node(2, 4))
+    assert_consistent(tree)
+
+
 # ===-----------------------------------------------------------------------===#
 # Grafting and roots
 # ===-----------------------------------------------------------------------===#
@@ -871,6 +1023,23 @@ def exercise_mutations[P: Bool]() raises:
     host.compact_bfs(1)
     _ = host.add_child(333)
     assert_consistent(host)
+
+    # Ordered insertion and moving, which touch the same links.
+    var edited = sample[P]()
+    _ = edited.insert_child_at(0, 0, 90)
+    _ = edited.insert_child_at(0, 2, 91)
+    _ = edited.insert_before(2, 92)
+    _ = edited.insert_after(3, 93)
+    assert_consistent(edited)
+    assert_true(edited.move_node(1, 3))
+    assert_consistent(edited)
+    assert_true(edited.move_node(3, 0))
+    assert_consistent(edited)
+    edited.remove(3)
+    _ = edited.add_child(94)
+    assert_consistent(edited)
+    var postorder = edited.get_postorder_indices()
+    assert_equal(len(postorder), len(edited))
 
     # A wide chain, removed from the middle and refilled.
     var wide = LCRSTree[Int, DType.uint32, P](0)
