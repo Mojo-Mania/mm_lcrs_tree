@@ -40,6 +40,7 @@ struct LCRSTree[
     T: Copyable & Deinitable,
     I: DType = DType.uint32,
     track_previous_sibling: Bool = False,
+    growth_percent: Int = 200,
 ](Copyable, Iterable, Movable, Sized):
     """A tree of arbitrary arity, stored as left-child / right-sibling links.
 
@@ -56,6 +57,11 @@ struct LCRSTree[
             O(1) for another index per node. When it is off the array stays
             empty and every line maintaining it compiles away, so the default
             costs nothing but the region it does not reserve.
+        growth_percent: How much to grow the buffers by when they fill, as a
+            percentage of the current capacity; 200 doubles. One buffer holds
+            every link region, so over-allocating costs `_REGIONS` times what
+            it would for a single array -- 150 wastes far less on a large tree,
+            and pairs well with an honest `capacity`.
 
 
     A tree always has a root, so it is never empty; construct it with the root
@@ -69,7 +75,11 @@ struct LCRSTree[
     comptime IteratorType[
         iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
     ]: Iterator = _DfsIter[
-        Self.T, Self.I, Self.track_previous_sibling, iterable_origin
+        Self.T,
+        Self.I,
+        Self.track_previous_sibling,
+        Self.growth_percent,
+        iterable_origin,
     ]
     """The iterator returned by `__iter__`: depth-first from the root."""
 
@@ -100,43 +110,28 @@ struct LCRSTree[
     """Slots in use, live and free."""
     var _free_count: Int
     """How many entries of the free region are in use."""
-    var _growth_percent: Int
-    """How much to grow the buffers by when they fill, as a percentage of the
-    current capacity. 200 doubles."""
 
     # ===-------------------------------------------------------------------===#
     # Lifecycle
     # ===-------------------------------------------------------------------===#
 
-    def __init__(
-        out self, root: Self.T, *, capacity: Int = 8, growth_percent: Int = 200
-    ):
+    def __init__(out self, root: Self.T, *, capacity: Int = 8):
         """Constructs a tree holding a single root node.
 
         Args:
             root: The element to store at the root.
             capacity: Slots to allocate up front. Passing the eventual node
                 count avoids every intermediate reallocation.
-            growth_percent: How much to grow by when the buffers fill, as a
-                percentage of the current capacity; 200 doubles. One buffer
-                holds every link region, so over-allocating costs `_REGIONS`
-                times what it would for a single array -- 150 wastes far less
-                on a large tree, and pairs well with an honest `capacity`.
         """
-        debug_assert(
-            growth_percent > 100,
-            (
-                "LCRSTree: growth_percent must exceed 100 or the buffers cannot"
-                " grow"
-            ),
-        )
+        comptime assert (
+            Self.growth_percent > 100
+        ), "growth_percent must exceed 100, or the buffers could never grow"
         var slots = capacity if capacity > 1 else 1
         self._elements = Self._alloc_elements(slots)
         self._links = Self._alloc_links(slots)
         self._capacity = slots
         self._count = 1
         self._free_count = 0
-        self._growth_percent = growth_percent if growth_percent > 100 else 200
         self._elements.unsafe_offset(0).unsafe_write(root.copy())
         # Every link of the root points at the root: it has no child, no
         # sibling and no parent.
@@ -152,7 +147,6 @@ struct LCRSTree[
         self._capacity = copy._capacity
         self._count = copy._count
         self._free_count = copy._free_count
-        self._growth_percent = copy._growth_percent
         self._elements = Self._alloc_elements(copy._capacity)
         self._links = Self._alloc_links(copy._capacity)
         unsafe_uninit_copy_n[overlapping=False](
@@ -175,7 +169,6 @@ struct LCRSTree[
         self._capacity = move._capacity
         self._count = move._count
         self._free_count = move._free_count
-        self._growth_percent = move._growth_percent
 
     def __deinit__(deinit self):
         """Destroys the live elements and releases both buffers."""
@@ -391,7 +384,11 @@ struct LCRSTree[
     def children(
         self, index: Int
     ) -> _ChildIter[
-        Self.T, Self.I, Self.track_previous_sibling, origin_of(self)
+        Self.T,
+        Self.I,
+        Self.track_previous_sibling,
+        Self.growth_percent,
+        origin_of(self),
     ]:
         """Returns an iterator over the node's children, in order.
 
@@ -406,7 +403,13 @@ struct LCRSTree[
 
     def dfs(
         self, root: Int = 0
-    ) -> _DfsIter[Self.T, Self.I, Self.track_previous_sibling, origin_of(self)]:
+    ) -> _DfsIter[
+        Self.T,
+        Self.I,
+        Self.track_previous_sibling,
+        Self.growth_percent,
+        origin_of(self),
+    ]:
         """Returns a depth-first (preorder) iterator over a subtree.
 
         The walk uses the parent links instead of a stack, so it allocates
@@ -422,7 +425,13 @@ struct LCRSTree[
 
     def bfs(
         self, root: Int = 0
-    ) -> _BfsIter[Self.T, Self.I, Self.track_previous_sibling, origin_of(self)]:
+    ) -> _BfsIter[
+        Self.T,
+        Self.I,
+        Self.track_previous_sibling,
+        Self.growth_percent,
+        origin_of(self),
+    ]:
         """Returns a breadth-first iterator over a subtree.
 
         Args:
@@ -809,7 +818,7 @@ struct LCRSTree[
         The element buffer moves in one bulk relocation and each link region in
         one `memcpy`, rather than an entry at a time.
         """
-        var capacity = self._capacity * self._growth_percent // 100
+        var capacity = self._capacity * Self.growth_percent // 100
         if capacity < needed:
             capacity = needed
 
@@ -965,6 +974,7 @@ struct _ChildIter[
     T: Copyable & Deinitable,
     I: DType,
     P: Bool,
+    G: Int,
     origin: Origin[mut=mut],
 ](ImplicitlyCopyable, Iterable, Iterator):
     """Yields the indices of one node's children, in order.
@@ -974,6 +984,7 @@ struct _ChildIter[
         T: The element type of the tree.
         I: The index type of the tree.
         P: Whether the tree keeps backward sibling links.
+        G: The tree's growth percentage.
         origin: The origin of the borrowed tree.
     """
 
@@ -982,12 +993,12 @@ struct _ChildIter[
         iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
     ]: Iterator = Self
 
-    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin]
+    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P, Self.G], Self.origin]
     var _node: Int
 
     def __init__(
         out self,
-        src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin],
+        src: Pointer[LCRSTree[Self.T, Self.I, Self.P, Self.G], Self.origin],
         node: Int,
     ):
         """Starts a walk of a sibling chain.
@@ -1033,6 +1044,7 @@ struct _DfsIter[
     T: Copyable & Deinitable,
     I: DType,
     P: Bool,
+    G: Int,
     origin: Origin[mut=mut],
 ](ImplicitlyCopyable, Iterable, Iterator):
     """Yields a subtree's node indices in depth-first preorder.
@@ -1042,6 +1054,7 @@ struct _DfsIter[
         T: The element type of the tree.
         I: The index type of the tree.
         P: Whether the tree keeps backward sibling links.
+        G: The tree's growth percentage.
         origin: The origin of the borrowed tree.
     """
 
@@ -1050,13 +1063,13 @@ struct _DfsIter[
         iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
     ]: Iterator = Self
 
-    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin]
+    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P, Self.G], Self.origin]
     var _root: Int
     var _node: Int
 
     def __init__(
         out self,
-        src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin],
+        src: Pointer[LCRSTree[Self.T, Self.I, Self.P, Self.G], Self.origin],
         root: Int,
     ):
         """Starts a preorder walk of the subtree at `root`.
@@ -1099,6 +1112,7 @@ struct _BfsIter[
     T: Copyable & Deinitable,
     I: DType,
     P: Bool,
+    G: Int,
     origin: Origin[mut=mut],
 ](Copyable, Iterable, Iterator):
     """Yields a subtree's node indices level by level.
@@ -1108,6 +1122,7 @@ struct _BfsIter[
         T: The element type of the tree.
         I: The index type of the tree.
         P: Whether the tree keeps backward sibling links.
+        G: The tree's growth percentage.
         origin: The origin of the borrowed tree.
     """
 
@@ -1116,13 +1131,13 @@ struct _BfsIter[
         iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
     ]: Iterator = Self
 
-    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin]
+    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P, Self.G], Self.origin]
     var _queue: List[Int]
     var _cursor: Int
 
     def __init__(
         out self,
-        src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin],
+        src: Pointer[LCRSTree[Self.T, Self.I, Self.P, Self.G], Self.origin],
         root: Int,
     ):
         """Starts a breadth-first walk of the subtree at `root`.
@@ -1169,14 +1184,15 @@ struct _BfsIter[
 
 
 def print_tree[
-    T: Copyable & Deinitable & Writable, I: DType, P: Bool, //
-](tree: LCRSTree[T, I, P], root: Int = 0):
+    T: Copyable & Deinitable & Writable, I: DType, P: Bool, G: Int, //
+](tree: LCRSTree[T, I, P, G], root: Int = 0):
     """Prints the shape of a tree, one node per line.
 
     Parameters:
         T: The element type, which must also be printable.
         I: The index type of the tree.
         P: Whether the tree keeps backward sibling links.
+        G: The tree's growth percentage.
 
     Args:
         tree: The tree to print.

@@ -25,7 +25,9 @@ def assert_indices(actual: List[Int], expected: List[Int]) raises:
         assert_equal(actual[i], expected[i])
 
 
-def assert_consistent[P: Bool, //](tree: LCRSTree[Int, DType.uint32, P]) raises:
+def assert_consistent[
+    P: Bool, G: Int, //
+](tree: LCRSTree[Int, DType.uint32, P, G]) raises:
     """Checks the invariants every structural change has to preserve.
 
     Children agree with their parent, node 0 is the only root, the reachable
@@ -634,7 +636,7 @@ def test_small_capacity_is_clamped() raises:
 
 def test_growth_percent_controls_capacity() raises:
     var doubling = LCRSTree[Int](0, capacity=4)
-    var gentle = LCRSTree[Int](0, capacity=4, growth_percent=150)
+    var gentle = LCRSTree[Int, DType.uint32, False, 150](0, capacity=4)
     for i in range(200):
         _ = doubling.add_child(i)
         _ = gentle.add_child(i)

@@ -15,7 +15,7 @@ Nodes are addressed by index, and a link pointing at its own node means "none",
 so no index value is reserved as a sentinel. Every index the tree needs — child,
 sibling, tail, parent and the free list — lives in **one** buffer divided into
 regions, with the elements in another, so a whole tree is two allocations and a
-48-byte handle. Growth relocates the elements in one bulk move and each link
+40-byte handle. Growth relocates the elements in one bulk move and each link
 region in one `memcpy`. Alongside the
 two tree links this implementation keeps a `parent` array — which makes upward
 walks, removal and node swaps possible — a `last_child` array, which is the tail
@@ -80,6 +80,19 @@ LCRSTree[Int]                   # uint32 indices (default): ~4.3B nodes
 LCRSTree[Int, DType.uint16]     # quarter the link memory, 65535 nodes max
 ```
 
+### Growth
+
+```mojo
+LCRSTree[Int]                                  # doubles when it fills
+LCRSTree[Int, DType.uint32, False, 150]        # grows by half instead
+var tree = LCRSTree[Int](root, capacity=10_000)   # or skip growing entirely
+tree.reserve(50_000)
+```
+
+`growth_percent` is the fourth parameter. One buffer holds every link region,
+so over-allocating costs `_REGIONS` times what it would for a plain array —
+150 with an honest `capacity` wastes far less than doubling on a large tree.
+
 ### Backward sibling links
 
 Sibling links only point forward, so detaching a node has to find what precedes
@@ -107,7 +120,7 @@ remove sits far along the chain.
 
 | Member | Meaning |
 | --- | --- |
-| `LCRSTree[T](root, capacity=8, growth_percent=200)` | A tree always has a root, so it is never empty. Pass the eventual node count as `capacity` to skip every reallocation. |
+| `LCRSTree[T](root, capacity=8)` | A tree always has a root, so it is never empty. Pass the eventual node count as `capacity` to skip every reallocation. |
 | `reserve(slots)` | Make room for `slots` nodes up front. |
 | `add_child(element, parent=0) -> Int` | Append as the last child, in constant time. |
 | `add_tree(other, parent=0) -> Int` | Graft a copy of another tree in. |
@@ -141,7 +154,7 @@ baselines, so default-mode numbers understate it.
 | enumerate all children | **0.7** | **0.7** | — |
 | create + destroy 20000 8-node trees | **91.0** | 661.9 | — |
 | bytes per node | **28** | 48 + an allocation per parent | a heap node + refcount each |
-| bytes per tree handle | **48** | 72 | — |
+| bytes per tree handle | **40** | 72 | — |
 
 Where the shape is wide rather than bushy:
 
