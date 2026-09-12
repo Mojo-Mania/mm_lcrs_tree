@@ -89,26 +89,40 @@ element owns heap storage costs nothing and can be mutated in place:
 tree[node] += "-suffix"       # no copy, no allocation
 ```
 
-If the values live somewhere else entirely, make the element type a reference
-to them. The tree then stores only structure:
+If the values live somewhere else entirely, the tree can hold references to
+them and store only structure. `BorrowedTree` threads the storage's origin
+through the tree's own type, so the compiler checks the borrow:
 
 ```mojo
-# Indices into storage you own -- simplest, and nothing to get wrong.
-var tree = LCRSTree[Int](0)
-for index in tree.dfs():
-    print(my_values[tree[index]])
+from mm_lcrs_tree import BorrowedTree, borrowed_tree
 
-# Or pointers, when an index is not natural.
-var tree = LCRSTree[Pointer[String, MutUntrackedOrigin]](
-    Pointer(to=words[0]).unsafe_origin_cast[MutUntrackedOrigin]()
-)
+def outline[o: ImmOrigin, //](lines: Span[String, o]) -> BorrowedTree[String, o]:
+    var tree = borrowed_tree(lines)               # root refers to lines[0]
+    var section = tree.add_child(Pointer(to=lines[1]))
+    _ = tree.add_child(Pointer(to=lines[2]), section)
+    return tree^
 ```
 
-**Prefer the index form.** The pointer form erases the origin, and Mojo
-destroys a value after its last use — so a `List` you took pointers into is
-destroyed as soon as you stop mentioning it, leaving the tree pointing at freed
-storage, with no compile error. Keeping it alive is then your job. Indices have
-no such hazard.
+Nothing is copied, and two things are checked for you: the storage is kept
+alive for as long as the tree needs it — no "destroyed after its last mention"
+surprise — and a tree that would outlive its storage fails to compile.
+
+The borrow is **immutable** by construction. A mutable one cannot work: the
+tree's type would embed a mutable reference to the storage, so every
+`add_child` would pass it mutably twice and the compiler rejects the call. To
+change the values, hold indices and mutate the storage directly:
+
+```mojo
+var tree = LCRSTree[Int](0)                       # elements index your storage
+for index in tree.dfs():
+    my_values[tree[index]] += 1
+```
+
+`LCRSTree[Pointer[T, MutUntrackedOrigin]]` also works and is the escape hatch
+when no origin can be threaded — but erasing the origin erases the check with
+it, and Mojo destroys a value after its last mention, so the storage can be
+freed while the tree still points into it, with no diagnostic. Reach for
+`BorrowedTree` or indices first.
 
 ### Growth
 

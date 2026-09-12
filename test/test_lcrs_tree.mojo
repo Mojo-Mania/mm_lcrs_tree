@@ -1,4 +1,9 @@
-from mm_lcrs_tree import LCRSTree, LCRSTreeBuilder
+from mm_lcrs_tree import (
+    BorrowedTree,
+    LCRSTree,
+    LCRSTreeBuilder,
+    borrowed_tree,
+)
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -129,11 +134,65 @@ def test_element_access_returns_a_reference() raises:
     assert_equal(tree[node], "replaced")
 
 
-def test_elements_can_be_pointers_into_foreign_storage() raises:
-    """A tree that records structure between values it does not own.
+def collect_borrowed[
+    origin: ImmOrigin, //
+](values: Span[String, origin]) raises -> List[String]:
+    """Builds a borrowing tree over `values` and reads it back.
 
-    Nothing here is copied: the elements are pointers, so the tree is pure
-    structure over storage that outlives it.
+    The tree is built and consumed here, but `values` belongs to the caller;
+    the origin threaded through `BorrowedTree` is what keeps it alive.
+    """
+    var tree = borrowed_tree(values)
+    var child = tree.add_child(Pointer(to=values[1]))
+    _ = tree.add_child(Pointer(to=values[2]), child)
+    var seen = List[String]()
+    for index in tree.dfs():
+        seen.append(tree[index][])
+    return seen^
+
+
+def test_borrowed_tree_tracks_the_origin() raises:
+    """The safe borrowing form: elements are pointers with a live origin.
+
+    Note the absence of any use of `words` after the call. With an erased
+    origin that would be a dangling read, because Mojo destroys a value after
+    its last mention; here the tree's type carries `origin_of(words)`, so the
+    compiler keeps the storage alive for as long as the tree needs it.
+    """
+    var words: List[String] = ["one", "two", "three"]
+    var seen = collect_borrowed(Span(words))
+    assert_equal(len(seen), 3)
+    assert_equal(seen[0], "one")
+    assert_equal(seen[1], "two")
+    assert_equal(seen[2], "three")
+
+
+def test_borrowed_tree_supports_the_full_api() raises:
+    var words: List[String] = ["a", "b", "c", "d"]
+    var span = Span(words)
+    var tree = borrowed_tree(span)
+    var first = tree.add_child(Pointer(to=span[1]))
+    var second = tree.add_child(Pointer(to=span[2]))
+    _ = tree.add_child(Pointer(to=span[3]), first)
+    assert_equal(len(tree), 4)
+    assert_equal(tree.children_count(0), 2)
+    assert_equal(tree.depth(second), 1)
+    tree.remove(second)
+    assert_equal(len(tree), 3)
+    var order = List[String]()
+    for index in tree.dfs():
+        order.append(tree[index][])
+    assert_equal(order[0], "a")
+    assert_equal(order[1], "b")
+    assert_equal(order[2], "d")
+
+
+def test_elements_can_be_erased_pointers() raises:
+    """The unsafe escape hatch, for when an origin cannot be threaded.
+
+    Erasing the origin costs the lifetime check, so keeping the storage alive
+    becomes the caller's job -- hence the otherwise pointless use of `words` at
+    the end. Prefer `BorrowedTree`, or indices.
     """
     var words: List[String] = ["one", "two", "three"]
     var tree = LCRSTree[Pointer[String, MutUntrackedOrigin]](

@@ -1177,6 +1177,63 @@ struct _BfsIter[
 
 
 # ===-----------------------------------------------------------------------===#
+# Borrowing the elements
+# ===-----------------------------------------------------------------------===#
+
+
+comptime BorrowedTree[T: Copyable & Deinitable, origin: ImmOrigin] = LCRSTree[
+    Pointer[T, origin]
+]
+"""A tree that records structure between values it does not own.
+
+The elements are pointers carrying `origin`, so the compiler tracks the
+borrow: the storage is kept alive for as long as the tree needs it, and a tree
+that would outlive it fails to compile.
+
+```mojo
+from mm_lcrs_tree import BorrowedTree, borrowed_tree
+
+def outline[o: ImmOrigin, //](lines: Span[String, o]) -> BorrowedTree[String, o]:
+    var tree = borrowed_tree(lines)                     # root is lines[0]
+    _ = tree.add_child(Pointer(to=lines[1]))
+    return tree^
+```
+
+The borrow is immutable by construction. A mutable one cannot work: the tree's
+own type would embed a mutable reference to the storage, so every `add_child`
+would be passing it mutably twice and the compiler rejects the call. To change
+the values, hold indices instead and mutate the storage directly.
+
+Parameters:
+    T: The type of the borrowed values.
+    origin: The origin of the storage they live in.
+"""
+
+
+def borrowed_tree[
+    T: Copyable & Deinitable, origin: ImmOrigin, //
+](values: Span[T, origin], root: Int = 0, *, capacity: Int = 8) -> BorrowedTree[
+    T, origin
+]:
+    """Starts a tree that borrows its elements from `values`.
+
+    Parameters:
+        T: The type of the borrowed values.
+        origin: The origin of the storage they live in.
+
+    Args:
+        values: The storage to borrow from. It must outlive the tree, which
+            the origin makes the compiler check.
+        root: Which of `values` the root node refers to.
+        capacity: Slots to allocate up front.
+
+    Returns:
+        A tree of one node, referring to `values[root]`.
+    """
+    return BorrowedTree[T, origin](Pointer(to=values[root]), capacity=capacity)
+
+
+# ===-----------------------------------------------------------------------===#
 # Printing
 # ===-----------------------------------------------------------------------===#
 
