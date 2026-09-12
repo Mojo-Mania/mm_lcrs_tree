@@ -95,6 +95,26 @@ A per-node subtree count would make `subtree_size` O(1) at four bytes a node,
 but it has to be maintained by every structural operation, so it waits until
 something needs it.
 
+### A compaction policy
+
+Compaction is worth 2.8× on traversal plus the memory — a depth-first walk over
+a half-freed tree drops from 3.7 to 1.3 ns per node, and the slot array shrinks
+to the live node count — but nothing triggered it, and it cannot be triggered
+silently: it **renumbers every node**, so any index the caller holds goes stale.
+
+`compact_if_fragmented(threshold=0.5)` is the shape that respects that. The
+caller invokes it, and the `Bool` it returns says whether the renumbering
+happened:
+
+```mojo
+if tree.compact_if_fragmented():
+    # every index you were holding is now stale
+```
+
+`fragmentation()` and `free_slots()` expose the same information for callers
+who want their own policy. A generation counter on indices would make silent
+compaction safe, and costs more than it is worth here.
+
 ### Elements are borrowed, not copied
 
 `tree[i]` returns a reference, so reading a node whose element owns heap storage
@@ -146,22 +166,9 @@ instead of a dense LIFO scan:
 16× worse in the case that matters, since subtrees removed over a tree's life
 do not free slots in address order.
 
-## Open, most worthwhile first
+## Open
 
-### 1. A compaction policy
-
-After removing half the nodes, a depth-first walk costs 3.7 ns per node; after
-`compact_dfs()` it costs 1.3, and the slot array went from 37449 to 1365. That
-is a 2.8× traversal win plus the memory, for one O(n) pass — and nothing
-triggers it.
-
-The catch is that compaction **renumbers nodes**, so any index a caller is
-holding goes stale. It cannot be silent. The honest shapes are a
-`compact_if_fragmented()` the caller invokes, or a `fragmentation()` accessor
-plus documentation. A generation counter on indices would make it safe to
-automate, and costs more than it is worth here.
-
-### 2. Smaller items
+### Smaller items
 
 - **`shrink_to_fit`.** `remove` frees slots but never returns memory; only
   compaction does, and only as a side effect. Cheap now that the buffers are

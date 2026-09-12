@@ -185,6 +185,8 @@ remove sits far along the chain.
 | `is_leaf/is_root/has_sibling/are_siblings/is_free` | Shape predicates; `is_free` reports a released slot. |
 | `swap_elements(a, b)` / `swap_nodes(a, b) -> Bool` | Exchange contents / exchange nodes with their subtrees. Also O(siblings) unless backward links are on. |
 | `compact_dfs(root=0)` / `compact_bfs(root=0)` | Renumber into traversal order, dropping free slots. |
+| `compact_if_fragmented(threshold=0.5) -> Bool` | Compact only when enough slots are free. Returns whether it did — if it did, your node indices are stale. |
+| `free_slots()`, `fragmentation()` | How much `remove` has left behind. |
 | `print_tree(tree)` | Free function; needs `Writable` elements. |
 
 ## Performance
@@ -237,9 +239,11 @@ Reading the tables:
 - **Small trees are cheap.** Creating and destroying 20000 eight-node trees
   costs 91 ns each against a child-list tree's 662, because a whole tree is two
   allocations: one for the elements, one for every index region together.
-- **`compact_dfs()` is worth calling** after a batch of removals: a depth-first
-  walk goes from 3.7 to 1.3 ns per node, and in the benchmark it returned
-  37449 slots to 1365.
+- **Compact after a batch of removals**: a depth-first walk goes from 3.7 to
+  1.3 ns per node, and in the benchmark it returned 37449 slots to 1365. Call
+  `compact_dfs()` outright, or `compact_if_fragmented()` to let the tree decide
+  — it returns `True` when it acted, which is also your signal that every node
+  index you were holding has been renumbered.
 
 ## Development
 

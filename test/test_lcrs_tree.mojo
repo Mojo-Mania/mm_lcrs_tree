@@ -818,6 +818,58 @@ def test_compact_reclaims_free_slots() raises:
     assert_consistent(tree)
 
 
+def test_fragmentation_reports_free_slots() raises:
+    var tree = sample()
+    assert_equal(tree.fragmentation(), 0.0)
+    assert_equal(tree.free_slots(), 0)
+    tree.remove(1)
+    assert_equal(tree.free_slots(), 3)
+    # 3 of 7 slots freed.
+    assert_true(tree.fragmentation() > 0.42)
+    assert_true(tree.fragmentation() < 0.43)
+
+
+def test_compact_if_fragmented_acts_above_the_threshold() raises:
+    var tree = LCRSTree[Int](0)
+    for i in range(1, 32):
+        _ = tree.add_child(i)
+    for i in range(1, 20):
+        tree.remove(i)
+    # The root plus children 20..31.
+    assert_equal(len(tree), 13)
+    assert_true(tree.compact_if_fragmented(0.5), "should have compacted")
+    assert_equal(len(tree), 13)
+    assert_equal(tree.capacity(), 13)
+    assert_equal(tree.free_slots(), 0)
+    assert_equal(tree.fragmentation(), 0.0)
+    var elements = List[Int]()
+    for index in tree.dfs():
+        elements.append(tree[index])
+    assert_equal(len(elements), 13)
+    assert_equal(elements[0], 0)
+    assert_equal(elements[1], 20)
+    assert_consistent(tree)
+
+
+def test_compact_if_fragmented_leaves_a_clean_tree_alone() raises:
+    var tree = sample()
+    assert_false(tree.compact_if_fragmented())
+    assert_indices(tree.get_dfs_indices(), [0, 1, 4, 5, 2, 3, 6])
+    # Below the threshold nothing moves, so held indices stay valid.
+    tree.remove(4)
+    assert_false(tree.compact_if_fragmented(0.9))
+    assert_equal(tree[5], 5, "node 5 should not have been renumbered")
+    assert_consistent(tree)
+
+
+def test_compact_if_fragmented_threshold_zero() raises:
+    var tree = sample()
+    tree.remove(6)
+    assert_true(tree.compact_if_fragmented(0.0))
+    assert_equal(tree.free_slots(), 0)
+    assert_consistent(tree)
+
+
 def test_compact_to_subtree() raises:
     var tree = sample()
     tree.compact_dfs(1)
@@ -1037,6 +1089,8 @@ def exercise_mutations[P: Bool]() raises:
     assert_consistent(edited)
     edited.remove(3)
     _ = edited.add_child(94)
+    assert_consistent(edited)
+    _ = edited.compact_if_fragmented(0.0)
     assert_consistent(edited)
     var postorder = edited.get_postorder_indices()
     assert_equal(len(postorder), len(edited))
