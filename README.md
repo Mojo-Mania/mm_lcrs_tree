@@ -46,6 +46,12 @@ var etc = fs.add_child("etc")
 _ = fs.add_child("hosts", etc)
 _ = fs.add_child("usr")
 
+print(fs)
+# - /
+#   - etc
+#     - hosts
+#   - usr
+
 for index in fs.dfs():          # depth first, allocation free
     print(fs[index])
 
@@ -187,7 +193,8 @@ remove sits far along the chain.
 | `compact_dfs(root=0)` / `compact_bfs(root=0)` | Renumber into traversal order, dropping free slots. |
 | `compact_if_fragmented(threshold=0.5) -> Bool` | Compact only when enough slots are free. Returns whether it did — if it did, your node indices are stale. |
 | `free_slots()`, `fragmentation()` | How much `remove` has left behind. |
-| `print_tree(tree)` | Free function; needs `Writable` elements. |
+| `print(tree)`, `String(tree)` | An indented outline. The tree is `Writable` whenever its elements are. |
+| `print_tree(tree, root)` | The same for a subtree. |
 
 ## Performance
 

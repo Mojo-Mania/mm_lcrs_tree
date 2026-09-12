@@ -1,6 +1,6 @@
 """A short tour of `LCRSTree`."""
 
-from mm_lcrs_tree import LCRSTree, LCRSTreeBuilder, print_tree
+from mm_lcrs_tree import LCRSTree, LCRSTreeBuilder
 
 
 def main() raises:
@@ -14,7 +14,7 @@ def main() raises:
     _ = fs.add_child("mojo", bin)
 
     print("nodes:", len(fs))
-    print_tree(fs)
+    print(fs)
 
     print("\ndepth first:")
     for index in fs.dfs():
@@ -52,4 +52,4 @@ def main() raises:
         .tree()
     )
     print("\nbuilt with the builder:")
-    print_tree(menu)
+    print(menu)

@@ -95,6 +95,16 @@ A per-node subtree count would make `subtree_size` O(1) at four bytes a node,
 but it has to be maintained by every structural operation, so it waits until
 something needs it.
 
+### Printing
+
+The tree is `Writable` whenever its elements are — a conditional conformance,
+so a tree of elements with no `write_to` still compiles, which a test checks.
+`print(tree)` and `String(tree)` give an indented outline, and `print_tree`
+survives as a thin wrapper for printing a subtree.
+
+The walk tracks its own depth rather than calling `depth()` per node, which was
+O(depth) each time and quadratic down a long chain.
+
 ### A compaction policy
 
 Compaction is worth 2.8× on traversal plus the memory — a depth-first walk over
@@ -180,8 +190,6 @@ do not free slots in address order.
 - **`add_tree` copies the source's free list** along with its nodes, so
   grafting a tree that has had removals carries the holes over. Compacting the
   source first avoids it; `add_tree` could do that itself.
-- **`Writable` on the tree**, so `print(tree)` works and `print_tree` becomes a
-  thin wrapper.
 - **`children_count` is O(k)**, and it is the kind of call that ends up in a
   loop. Document it loudly, or keep a per-node child count — the same four
   bytes as the subtree size above, and the same argument for waiting.

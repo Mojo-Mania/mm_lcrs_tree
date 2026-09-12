@@ -41,7 +41,13 @@ struct LCRSTree[
     I: DType = DType.uint32,
     track_previous_sibling: Bool = False,
     growth_percent: Int = 200,
-](Copyable, Iterable, Movable, Sized):
+](
+    Copyable,
+    Iterable,
+    Movable,
+    Sized,
+    Writable where conforms_to(T, Writable),
+):
     """A tree of arbitrary arity, stored as left-child / right-sibling links.
 
     Parameters:
@@ -529,6 +535,56 @@ struct LCRSTree[
             An iterator yielding the indices of childless nodes.
         """
         return {src = Pointer(to=self), root = root}
+
+    def write_to(
+        self, mut writer: Some[Writer]
+    ) where conforms_to(Self.T, Writable):
+        """Writes the tree as an indented outline, one node per line.
+
+        Args:
+            writer: The writer to write to.
+        """
+        self._write_from(writer, 0)
+
+    def _write_from(
+        self, mut writer: Some[Writer], root: Int
+    ) where conforms_to(Self.T, Writable):
+        """Writes the subtree at `root`, tracking depth as it walks.
+
+        Depth comes from the walk rather than from `depth()` per node: that
+        would be O(depth) each time, and quadratic down a long chain.
+        """
+        if root >= self._count:
+            return
+        var node = root
+        var depth = 0
+        var first = True
+        while True:
+            if not first:
+                writer.write("\n")
+            first = False
+            for _ in range(depth):
+                writer.write("  ")
+            writer.write("- ", self._elements[unsafe_offset=node])
+
+            if not self.is_leaf(node):
+                node = self._left(node)
+                depth += 1
+                continue
+
+            var climbing = node
+            var climbed = 0
+            var advanced = False
+            while climbing != root:
+                if self.has_sibling(climbing):
+                    node = self._right(climbing)
+                    depth -= climbed
+                    advanced = True
+                    break
+                climbing = self._parent_of_raw(climbing)
+                climbed += 1
+            if not advanced:
+                return
 
     def get_postorder_indices(self, root: Int = 0) -> List[Int]:
         """Returns every node of a subtree, children before parents.
@@ -1672,6 +1728,8 @@ def print_tree[
 ](tree: LCRSTree[T, I, P, G], root: Int = 0):
     """Prints the shape of a tree, one node per line.
 
+    `print(tree)` does the same for the whole tree; this takes a subtree root.
+
     Parameters:
         T: The element type, which must also be printable.
         I: The index type of the tree.
@@ -1682,8 +1740,6 @@ def print_tree[
         tree: The tree to print.
         root: The node to print from.
     """
-    for index in tree.dfs(root):
-        var indentation = String()
-        for _ in range(tree.depth(index) - tree.depth(root)):
-            indentation += "  "
-        print(indentation, "-", tree[index])
+    var out = String()
+    tree._write_from(out, root)
+    print(out)

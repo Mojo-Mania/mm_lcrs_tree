@@ -881,6 +881,50 @@ def test_compact_to_subtree() raises:
 
 
 # ===-----------------------------------------------------------------------===#
+# Printing
+# ===-----------------------------------------------------------------------===#
+
+
+@fieldwise_init
+struct Opaque(Copyable, Movable):
+    """An element type with no `Writable` conformance, to check that the
+    tree's own conformance is conditional and does not demand one."""
+
+    var value: Int
+
+
+def test_write_to_produces_an_outline() raises:
+    var expected = String("- 0\n  - 1\n    - 4\n    - 5\n  - 2\n  - 3\n    - 6")
+    assert_equal(String(sample()), expected)
+
+
+def test_write_to_a_subtree() raises:
+    var tree = sample()
+    var out = String()
+    tree._write_from(out, 1)
+    assert_equal(out, String("- 1\n  - 4\n  - 5"))
+
+
+def test_write_to_a_single_node() raises:
+    var tree = LCRSTree[Int](7)
+    assert_equal(String(tree), "- 7")
+
+
+def test_write_to_after_editing() raises:
+    var tree = sample()
+    tree.remove(1)
+    _ = tree.insert_child_at(0, 0, 9)
+    assert_equal(String(tree), String("- 0\n  - 9\n  - 2\n  - 3\n    - 6"))
+
+
+def test_tree_of_unprintable_elements_still_compiles() raises:
+    var tree = LCRSTree[Opaque](Opaque(1))
+    var child = tree.add_child(Opaque(2))
+    assert_equal(len(tree), 2)
+    assert_equal(tree[child].value, 2)
+
+
+# ===-----------------------------------------------------------------------===#
 # Builder, generality
 # ===-----------------------------------------------------------------------===#
 
