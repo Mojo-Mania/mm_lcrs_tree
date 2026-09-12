@@ -76,6 +76,29 @@ LCRSTree[Int]                   # uint32 indices (default): ~4.3B nodes
 LCRSTree[Int, DType.uint16]     # quarter the link memory, 65535 nodes max
 ```
 
+### Backward sibling links
+
+Sibling links only point forward, so detaching a node has to find what precedes
+it by scanning its parent's child chain — which makes `remove` and `swap_nodes`
+O(number of siblings). If that matters, ask for a backward link too:
+
+```mojo
+LCRSTree[Int, DType.uint32, True]   # track_previous_sibling
+```
+
+Both become O(1), for one more index per node (24 → 28 bytes). It is off by
+default because most trees are not wide and most workloads do not remove much:
+when it is off the array stays empty and every line maintaining it compiles
+away, so you pay nothing but an empty `List` header per tree.
+
+| remove 2000 children of a 4000-child node, back to front | ns per removal |
+| --- | --- |
+| `LCRSTree[Int]` | 1718.4 |
+| `LCRSTree[Int, DType.uint32, True]` | **110.9** |
+
+Front to back the two are close; the scan is only expensive when what you
+remove sits far along the chain.
+
 ## API
 
 | Member | Meaning |
@@ -84,7 +107,7 @@ LCRSTree[Int, DType.uint16]     # quarter the link memory, 65535 nodes max
 | `add_child(element, parent=0) -> Int` | Append as the last child, in constant time. |
 | `add_tree(other, parent=0) -> Int` | Graft a copy of another tree in. |
 | `prepend_root(element) -> Int` | Insert a new root above the current one. |
-| `remove(index)` | Drop a node and its subtree; slots go on the free list. |
+| `remove(index)` | Drop a node and its subtree; slots go on the free list. O(siblings) unless backward links are on. |
 | `tree[i]`, `tree[i] = x`, `len(tree)`, `capacity()` | Element access, live nodes, slot count. |
 | `for index in tree` / `tree.dfs(root=0)` | Depth-first preorder; uses parent links, so no stack and no recursion. |
 | `tree.bfs(root=0)` | Breadth-first. |
@@ -92,7 +115,7 @@ LCRSTree[Int, DType.uint16]     # quarter the link memory, 65535 nodes max
 | `get_dfs_indices()`, `get_bfs_indices()`, `children_indices()`, `ancestor_indices()` | The same as lists. |
 | `children_count()`, `depth()`, `parent_of()` | O(children), O(depth), O(1). |
 | `is_leaf/is_root/has_sibling/are_siblings` | Shape predicates. |
-| `swap_elements(a, b)` / `swap_nodes(a, b) -> Bool` | Exchange contents / exchange nodes with their subtrees. |
+| `swap_elements(a, b)` / `swap_nodes(a, b) -> Bool` | Exchange contents / exchange nodes with their subtrees. Also O(siblings) unless backward links are on. |
 | `compact_dfs(root=0)` / `compact_bfs(root=0)` | Renumber into traversal order, dropping free slots. |
 | `print_tree(tree)` | Free function; needs `Writable` elements. |
 
@@ -139,7 +162,7 @@ Reading the tables:
 ## Development
 
 ```bash
-pixi run test     # the test suite (49 tests)
+pixi run test     # the test suite (53 tests)
 pixi run bench    # the benchmarks above
 pixi run main     # the example
 pixi run format   # mojo format

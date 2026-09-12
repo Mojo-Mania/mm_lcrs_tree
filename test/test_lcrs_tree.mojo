@@ -7,9 +7,9 @@ from std.testing import (
 )
 
 
-def sample() -> LCRSTree[Int]:
+def sample[P: Bool = False]() -> LCRSTree[Int, DType.uint32, P]:
     """Builds 0:(1:(4, 5), 2, 3:(6))."""
-    var tree = LCRSTree[Int](0)
+    var tree = LCRSTree[Int, DType.uint32, P](0)
     var a = tree.add_child(1)
     _ = tree.add_child(2)
     var c = tree.add_child(3)
@@ -25,7 +25,7 @@ def assert_indices(actual: List[Int], expected: List[Int]) raises:
         assert_equal(actual[i], expected[i])
 
 
-def assert_consistent(tree: LCRSTree[Int]) raises:
+def assert_consistent[P: Bool, //](tree: LCRSTree[Int, DType.uint32, P]) raises:
     """Checks the invariants every structural change has to preserve.
 
     Children agree with their parent, node 0 is the only root, the reachable
@@ -36,12 +36,32 @@ def assert_consistent(tree: LCRSTree[Int]) raises:
     for node in tree.dfs():
         seen += 1
         var last = -1
+        var previous = -1
         for child in tree.children(node):
             assert_equal(
                 tree.parent_of(child),
                 node,
                 String("child ", child, " disagrees about its parent"),
             )
+            comptime if P:
+                var recorded = Int(tree._prev_sibling[child])
+                if previous == -1:
+                    assert_equal(
+                        recorded,
+                        child,
+                        String(
+                            "first child ",
+                            child,
+                            " records a predecessor it does not have",
+                        ),
+                    )
+                else:
+                    assert_equal(
+                        recorded,
+                        previous,
+                        String("child ", child, " has a stale prev_sibling"),
+                    )
+            previous = child
             last = child
         var cached = Int(tree._last_child[node])
         if last == -1:
@@ -568,6 +588,108 @@ def test_copy_is_independent() raises:
     _ = duplicate.add_child(9)
     assert_equal(len(tree), 7)
     assert_equal(len(duplicate), 8)
+
+
+# ===-----------------------------------------------------------------------===#
+# The same structural work under both settings of track_previous_sibling
+#
+# With backward links off, `_detach` scans the child chain to find what
+# precedes a node; with them on it reads one array. The two must be
+# indistinguishable from outside, so the whole mutation surface runs twice.
+# ===-----------------------------------------------------------------------===#
+
+
+def exercise_mutations[P: Bool]() raises:
+    var tree = sample[P]()
+
+    # Remove each kind of child, appending after each so the tail and the
+    # backward links both have to be right.
+    tree.remove(4)
+    var after_first = tree.add_child(40, 1)
+    assert_indices(tree.children_indices(1), [5, after_first])
+    assert_consistent(tree)
+
+    tree.remove(3)
+    var after_last = tree.add_child(30)
+    assert_indices(tree.children_indices(0), [1, 2, after_last])
+    assert_consistent(tree)
+
+    tree.remove(2)
+    assert_indices(tree.children_indices(0), [1, after_last])
+    assert_consistent(tree)
+
+    # Swaps, adjacent and not.
+    var fresh = sample[P]()
+    assert_true(fresh.swap_nodes(1, 2))
+    assert_indices(fresh.children_indices(0), [2, 1, 3])
+    assert_consistent(fresh)
+    assert_true(fresh.swap_nodes(2, 3))
+    assert_indices(fresh.children_indices(0), [3, 1, 2])
+    assert_consistent(fresh)
+    assert_true(fresh.swap_nodes(1, 6))
+    assert_consistent(fresh)
+    _ = fresh.add_child(77)
+    assert_consistent(fresh)
+
+    # New roots and grafts.
+    var rooted = sample[P]()
+    var moved = rooted.prepend_root(99)
+    _ = rooted.add_child(90, moved)
+    assert_consistent(rooted)
+
+    var host = sample[P]()
+    var other = sample[P]()
+    var grafted = host.add_tree(other, 1)
+    _ = host.add_child(111, grafted)
+    assert_consistent(host)
+
+    # Compaction, then more appends.
+    host.compact_dfs()
+    _ = host.add_child(222)
+    assert_consistent(host)
+    host.compact_bfs(1)
+    _ = host.add_child(333)
+    assert_consistent(host)
+
+    # A wide chain, removed from the middle and refilled.
+    var wide = LCRSTree[Int, DType.uint32, P](0)
+    for i in range(200):
+        _ = wide.add_child(i)
+    for i in range(1, 200, 2):
+        wide.remove(i)
+    assert_equal(len(wide), 101)
+    for i in range(50):
+        _ = wide.add_child(1000 + i)
+    assert_equal(len(wide), 151)
+    assert_consistent(wide)
+
+
+def test_mutations_without_backward_links() raises:
+    exercise_mutations[False]()
+
+
+def test_mutations_with_backward_links() raises:
+    exercise_mutations[True]()
+
+
+def test_backward_links_cost_nothing_when_off() raises:
+    var plain = sample[False]()
+    assert_equal(len(plain._prev_sibling), 0)
+    var tracked = sample[True]()
+    assert_equal(len(tracked._prev_sibling), len(tracked))
+
+
+def test_both_settings_agree_on_shape() raises:
+    var plain = sample[False]()
+    var tracked = sample[True]()
+    plain.remove(4)
+    tracked.remove(4)
+    _ = plain.add_child(40, 1)
+    _ = tracked.add_child(40, 1)
+    assert_true(plain.swap_nodes(1, 3))
+    assert_true(tracked.swap_nodes(1, 3))
+    assert_indices(plain.get_dfs_indices(), tracked.get_dfs_indices())
+    assert_indices(plain.get_bfs_indices(), tracked.get_bfs_indices())
 
 
 def main() raises:

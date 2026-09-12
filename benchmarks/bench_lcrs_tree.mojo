@@ -341,6 +341,43 @@ def bench_nth_child() raises:
     print("   (per lookup, not per node)")
 
 
+def bench_remove_wide() raises:
+    """Removing from a wide node, with and without backward sibling links.
+
+    Children are removed back to front, which is the worst case for the
+    forward scan `_detach` falls back on: every removal walks almost the whole
+    chain. Removing front to back would barely show a difference.
+    """
+    header(
+        String(
+            "remove ",
+            WIDTH // 2,
+            " children of a wide node, back to front (build included)",
+        )
+    )
+
+    def without() raises:
+        var tree = LCRSTree[Int](0)
+        var kids = List[Int]()
+        for i in range(WIDTH):
+            kids.append(tree.add_child(i))
+        for i in range(WIDTH - 1, -1, -2):
+            tree.remove(kids[i])
+        keep(len(tree))
+
+    def with_links() raises:
+        var tree = LCRSTree[Int, DType.uint32, True](0)
+        var kids = List[Int]()
+        for i in range(WIDTH):
+            kids.append(tree.add_child(i))
+        for i in range(WIDTH - 1, -1, -2):
+            tree.remove(kids[i])
+        keep(len(tree))
+
+    report("backward links off", per_node(measure(without), WIDTH // 2))
+    report("backward links on", per_node(measure(with_links), WIDTH // 2))
+
+
 def bench_compaction() raises:
     # Build breadth-first, then remove half the nodes, so the live nodes are
     # scattered across the slot array -- the state compaction exists to fix.
@@ -407,5 +444,6 @@ def main() raises:
     bench_traversal()
     bench_children()
     bench_nth_child()
+    bench_remove_wide()
     bench_compaction()
     report_memory()

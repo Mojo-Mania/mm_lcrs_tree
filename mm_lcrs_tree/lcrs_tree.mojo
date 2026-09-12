@@ -28,9 +28,11 @@ for index in tree.dfs():
 """
 
 
-struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
-    Copyable, Iterable, Movable, Sized
-):
+struct LCRSTree[
+    T: Copyable & Deinitable,
+    I: DType = DType.uint32,
+    track_previous_sibling: Bool = False,
+](Copyable, Iterable, Movable, Sized):
     """A tree of arbitrary arity, stored as left-child / right-sibling links.
 
     Parameters:
@@ -39,6 +41,13 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             `uint32` allows a little over four billion nodes; `uint16` quarters
             the memory used by the link arrays but caps the tree at 65535
             nodes.
+        track_previous_sibling: Whether to keep a backward link alongside the
+            forward one. Off by default, in which case detaching a node scans
+            its parent's child chain to find what precedes it, making `remove`
+            and `swap_nodes` O(number of siblings). Turning it on makes both
+            O(1) for another index per node. When it is off the array stays
+            empty and every line maintaining it compiles away, so the default
+            costs nothing but the empty `List` header.
 
     A tree always has a root, so it is never empty; construct it with the root
     element. Nodes are referred to by index, which stays stable until
@@ -50,7 +59,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
 
     comptime IteratorType[
         iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
-    ]: Iterator = _DfsIter[Self.T, Self.I, iterable_origin]
+    ]: Iterator = _DfsIter[
+        Self.T, Self.I, Self.track_previous_sibling, iterable_origin
+    ]
     """The iterator returned by `__iter__`: depth-first from the root."""
 
     var _elements: List[Self.T]
@@ -62,6 +73,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
     var _last_child: List[Self.Index]
     """Cached tail of each node's child chain, so appending is O(1); a node
     points at itself when it has no children."""
+    var _prev_sibling: List[Self.Index]
+    """Backward link, kept only when `track_previous_sibling` is on and empty
+    otherwise; a node points at itself when it is a first child."""
     var _parent: List[Self.Index]
     """Parent of every node; the root points at itself."""
     var _free: List[Self.Index]
@@ -83,6 +97,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         self._last_child = [0]
         self._parent = [0]
         self._free = []
+        self._prev_sibling = []
+        comptime if Self.track_previous_sibling:
+            self._prev_sibling.append(0)
 
     # ===-------------------------------------------------------------------===#
     # Size and element access
@@ -261,7 +278,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
 
     def children(
         self, index: Int
-    ) -> _ChildIter[Self.T, Self.I, origin_of(self)]:
+    ) -> _ChildIter[
+        Self.T, Self.I, Self.track_previous_sibling, origin_of(self)
+    ]:
         """Returns an iterator over the node's children, in order.
 
         Args:
@@ -273,7 +292,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         var first = Int(self._left_child[index])
         return {src = Pointer(to=self), node = -1 if first == index else first}
 
-    def dfs(self, root: Int = 0) -> _DfsIter[Self.T, Self.I, origin_of(self)]:
+    def dfs(
+        self, root: Int = 0
+    ) -> _DfsIter[Self.T, Self.I, Self.track_previous_sibling, origin_of(self)]:
         """Returns a depth-first (preorder) iterator over a subtree.
 
         The walk uses the parent links instead of a stack, so it allocates
@@ -287,7 +308,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         """
         return {src = Pointer(to=self), root = root}
 
-    def bfs(self, root: Int = 0) -> _BfsIter[Self.T, Self.I, origin_of(self)]:
+    def bfs(
+        self, root: Int = 0
+    ) -> _BfsIter[Self.T, Self.I, Self.track_previous_sibling, origin_of(self)]:
         """Returns a breadth-first iterator over a subtree.
 
         Args:
@@ -387,6 +410,10 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             )
             self._last_child.append(other._last_child[i] + Self.Index(offset))
             self._parent.append(other._parent[i] + Self.Index(offset))
+            comptime if Self.track_previous_sibling:
+                self._prev_sibling.append(
+                    other._prev_sibling[i] + Self.Index(offset)
+                )
         for i in range(len(other._free)):
             self._free.append(other._free[i] + Self.Index(offset))
 
@@ -426,6 +453,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         self._last_child[0] = Self.Index(moved)
         self._right_sibling[0] = 0
         self._parent[0] = 0
+        self._set_prev(moved, moved)
 
         for child in self.children(moved):
             self._parent[child] = Self.Index(moved)
@@ -450,6 +478,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             self._last_child = [0]
             self._parent = [0]
             self._free = []
+            self._prev_sibling = []
+            comptime if Self.track_previous_sibling:
+                self._prev_sibling.append(0)
             return
 
         self._detach(index)
@@ -526,6 +557,19 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             self._last_child[parent_a] = Self.Index(b)
         if last_b == b:
             self._last_child[parent_b] = Self.Index(a)
+
+        comptime if Self.track_previous_sibling:
+            # Each node inherits the other's predecessor, and whatever now
+            # follows each of them points back at it. The follower steps run
+            # last so they win when the two were adjacent siblings.
+            self._set_prev(b, b if previous_a == -1 else previous_a)
+            self._set_prev(a, a if previous_b == -1 else previous_b)
+            var after_b = Int(self._right_sibling[b])
+            if after_b != b:
+                self._set_prev(after_b, b)
+            var after_a = Int(self._right_sibling[a])
+            if after_a != a:
+                self._set_prev(after_a, a)
         return True
 
     def compact_dfs(mut self, root: Int = 0):
@@ -565,6 +609,8 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             self._right_sibling.append(Self.Index(index))
             self._last_child.append(Self.Index(index))
             self._parent.append(Self.Index(index))
+            comptime if Self.track_previous_sibling:
+                self._prev_sibling.append(Self.Index(index))
             return index
         var index = Int(self._free.pop())
         self._elements[index] = element.copy()
@@ -572,6 +618,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         self._right_sibling[index] = Self.Index(index)
         self._last_child[index] = Self.Index(index)
         self._parent[index] = Self.Index(index)
+        self._set_prev(index, index)
         return index
 
     def _append_child(mut self, parent: Int, node: Int):
@@ -579,19 +626,31 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         var last = Int(self._last_child[parent])
         if last == parent:
             self._left_child[parent] = Self.Index(node)
+            self._set_prev(node, node)
         else:
             self._right_sibling[last] = Self.Index(node)
+            self._set_prev(node, last)
         self._last_child[parent] = Self.Index(node)
+
+    @always_inline
+    def _set_prev(mut self, node: Int, previous: Int):
+        """Records what precedes `node`, if backward links are being kept."""
+        comptime if Self.track_previous_sibling:
+            self._prev_sibling[node] = Self.Index(previous)
 
     def _previous_sibling(self, node: Int) -> Int:
         """Returns the sibling before `node`, or -1 if it is the first child."""
-        var parent = Int(self._parent[node])
-        var child = Int(self._left_child[parent])
-        if child == node:
-            return -1
-        while Int(self._right_sibling[child]) != node:
-            child = Int(self._right_sibling[child])
-        return child
+        comptime if Self.track_previous_sibling:
+            var previous = Int(self._prev_sibling[node])
+            return -1 if previous == node else previous
+        else:
+            var parent = Int(self._parent[node])
+            var child = Int(self._left_child[parent])
+            if child == node:
+                return -1
+            while Int(self._right_sibling[child]) != node:
+                child = Int(self._right_sibling[child])
+            return child
 
     def _relink(mut self, parent: Int, previous: Int, node: Int):
         """Puts `node` where a former child of `parent` sat."""
@@ -618,6 +677,9 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             self._last_child[parent] = Self.Index(
                 parent if previous == -1 else previous
             )
+        if sibling != index:
+            # Whatever followed now follows the detached node's predecessor.
+            self._set_prev(sibling, sibling if previous == -1 else previous)
 
     @staticmethod
     def _remap(mapping: List[Int], old: Int, fallback: Int) -> Self.Index:
@@ -638,6 +700,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         var right_sibling = List[Self.Index](capacity=size)
         var last_child = List[Self.Index](capacity=size)
         var parent = List[Self.Index](capacity=size)
+        var prev_sibling = List[Self.Index]()
 
         for new_index in range(size):
             var old = kept[new_index]
@@ -654,6 +717,12 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
             last_child.append(
                 self._remap(mapping, Int(self._last_child[old]), new_index)
             )
+            comptime if Self.track_previous_sibling:
+                prev_sibling.append(
+                    self._remap(
+                        mapping, Int(self._prev_sibling[old]), new_index
+                    )
+                )
             parent.append(
                 self._remap(mapping, Int(self._parent[old]), new_index)
             )
@@ -663,6 +732,7 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
         self._right_sibling = right_sibling^
         self._last_child = last_child^
         self._parent = parent^
+        self._prev_sibling = prev_sibling^
         self._free.clear()
 
 
@@ -672,7 +742,12 @@ struct LCRSTree[T: Copyable & Deinitable, I: DType = DType.uint32](
 
 
 struct _ChildIter[
-    mut: Bool, //, T: Copyable & Deinitable, I: DType, origin: Origin[mut=mut]
+    mut: Bool,
+    //,
+    T: Copyable & Deinitable,
+    I: DType,
+    P: Bool,
+    origin: Origin[mut=mut],
 ](ImplicitlyCopyable, Iterable, Iterator):
     """Yields the indices of one node's children, in order.
 
@@ -680,6 +755,7 @@ struct _ChildIter[
         mut: Whether the borrow of the tree is mutable.
         T: The element type of the tree.
         I: The index type of the tree.
+        P: Whether the tree keeps backward sibling links.
         origin: The origin of the borrowed tree.
     """
 
@@ -688,12 +764,12 @@ struct _ChildIter[
         iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
     ]: Iterator = Self
 
-    var _src: Pointer[LCRSTree[Self.T, Self.I], Self.origin]
+    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin]
     var _node: Int
 
     def __init__(
         out self,
-        src: Pointer[LCRSTree[Self.T, Self.I], Self.origin],
+        src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin],
         node: Int,
     ):
         """Starts a walk of a sibling chain.
@@ -732,7 +808,12 @@ struct _ChildIter[
 
 
 struct _DfsIter[
-    mut: Bool, //, T: Copyable & Deinitable, I: DType, origin: Origin[mut=mut]
+    mut: Bool,
+    //,
+    T: Copyable & Deinitable,
+    I: DType,
+    P: Bool,
+    origin: Origin[mut=mut],
 ](ImplicitlyCopyable, Iterable, Iterator):
     """Yields a subtree's node indices in depth-first preorder.
 
@@ -740,6 +821,7 @@ struct _DfsIter[
         mut: Whether the borrow of the tree is mutable.
         T: The element type of the tree.
         I: The index type of the tree.
+        P: Whether the tree keeps backward sibling links.
         origin: The origin of the borrowed tree.
     """
 
@@ -748,13 +830,13 @@ struct _DfsIter[
         iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
     ]: Iterator = Self
 
-    var _src: Pointer[LCRSTree[Self.T, Self.I], Self.origin]
+    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin]
     var _root: Int
     var _node: Int
 
     def __init__(
         out self,
-        src: Pointer[LCRSTree[Self.T, Self.I], Self.origin],
+        src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin],
         root: Int,
     ):
         """Starts a preorder walk of the subtree at `root`.
@@ -792,7 +874,12 @@ struct _DfsIter[
 
 
 struct _BfsIter[
-    mut: Bool, //, T: Copyable & Deinitable, I: DType, origin: Origin[mut=mut]
+    mut: Bool,
+    //,
+    T: Copyable & Deinitable,
+    I: DType,
+    P: Bool,
+    origin: Origin[mut=mut],
 ](Copyable, Iterable, Iterator):
     """Yields a subtree's node indices level by level.
 
@@ -800,6 +887,7 @@ struct _BfsIter[
         mut: Whether the borrow of the tree is mutable.
         T: The element type of the tree.
         I: The index type of the tree.
+        P: Whether the tree keeps backward sibling links.
         origin: The origin of the borrowed tree.
     """
 
@@ -808,13 +896,13 @@ struct _BfsIter[
         iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
     ]: Iterator = Self
 
-    var _src: Pointer[LCRSTree[Self.T, Self.I], Self.origin]
+    var _src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin]
     var _queue: List[Int]
     var _cursor: Int
 
     def __init__(
         out self,
-        src: Pointer[LCRSTree[Self.T, Self.I], Self.origin],
+        src: Pointer[LCRSTree[Self.T, Self.I, Self.P], Self.origin],
         root: Int,
     ):
         """Starts a breadth-first walk of the subtree at `root`.
@@ -861,13 +949,14 @@ struct _BfsIter[
 
 
 def print_tree[
-    T: Copyable & Deinitable & Writable, I: DType, //
-](tree: LCRSTree[T, I], root: Int = 0):
+    T: Copyable & Deinitable & Writable, I: DType, P: Bool, //
+](tree: LCRSTree[T, I, P], root: Int = 0):
     """Prints the shape of a tree, one node per line.
 
     Parameters:
         T: The element type, which must also be printable.
         I: The index type of the tree.
+        P: Whether the tree keeps backward sibling links.
 
     Args:
         tree: The tree to print.

@@ -46,11 +46,30 @@ has to maintain the tail: `_append_child`, `_detach`, `prepend_root`,
 checks the cached tail against the real chain for every node, and ten tests
 append after each of those operations.
 
-**Still open:** `remove` is O(k) regardless, because `_detach` calls
-`_previous_sibling` to find what precedes the node being removed. A
-`prev_sibling` array would make removal O(1) too, at another four bytes a node
-— worth it only for remove-heavy workloads, since it doubles the link
-maintenance surface.
+**The same treatment for removal, opt in.** `_detach` still had to find what
+precedes the node being unhooked, so `remove` and `swap_nodes` stayed O(k). A
+backward link fixes that, but it is only worth four bytes a node to trees that
+actually remove from wide chains — so it is a compile-time parameter rather
+than a second unconditional array:
+
+```mojo
+LCRSTree[Int, DType.uint32, True]   # track_previous_sibling
+```
+
+| remove 2000 children of a 4000-child node, back to front | ns per removal |
+| --- | --- |
+| off (the default) | 1718.4 |
+| on | **110.9** |
+
+Every site that maintains the forward link now maintains the backward one
+inside a `comptime if`, so with the parameter off the array stays empty and the
+maintenance compiles away entirely — the cost of the default is an empty `List`
+header per tree, not per node. `assert_consistent` checks the backward links
+against the real chain when they are on, and the whole mutation surface is
+exercised twice, once under each setting.
+
+Direction matters: removing front to back barely notices the difference, since
+the forward scan stops immediately. The number above is the worst case.
 
 ## 2. Breadth-first traversal and child enumeration cost about 2×
 
