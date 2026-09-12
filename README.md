@@ -211,25 +211,29 @@ Where the shape is wide rather than bushy:
 
 Reading the tables:
 
-- **Building is where LCRS wins** — 2.5× a child-list tree and 7× a pointer
-  tree, because adding a node is three array appends and no allocation at all.
-  It also holds a node in 20 bytes against 48 plus a per-parent allocation.
+- **Building is where LCRS wins** — roughly 8× a child-list tree and 25× a
+  pointer tree, because adding a node writes a few array slots and allocates
+  nothing at all. It also holds a node in 28 bytes against 48 plus a per-parent
+  allocation.
 - **Depth-first traversal is a wash**, and it is the traversal this layout is
   built for: the parent-link walk needs no stack, so it cannot overflow on a
   deep tree and allocates nothing.
-- **Breadth-first and child enumeration cost about 2× a child list**, which is
-  the sibling chain doing its job.
+- **Breadth-first walking and child enumeration are at parity** with a
+  child-list tree (0.8 against 1.0, and 0.7 against 0.7). Walking a sibling
+  chain sounds like it should lose to reading a contiguous array of children,
+  but the links are a dense `uint32` region, so it is a sequential scan either
+  way.
 - **Wide fan-out used to be the weak spot.** `add_child` appended by walking to
   the end of the sibling chain, making a node with 4000 children quadratic to
   build — 1224 ns per node. Caching the tail of each child chain in a
-  `last_child` array brought that to 12.2, at the cost of four bytes a node.
+  `last_child` array brought that to 2.9, at the cost of four bytes a node.
 - **Indexed child access is O(k) by design.** If you need the k-th child of a
   wide node in a loop, this is the wrong structure.
 - **Small trees are cheap.** Creating and destroying 20000 eight-node trees
   costs 91 ns each against a child-list tree's 662, because a whole tree is two
   allocations: one for the elements, one for every index region together.
 - **`compact_dfs()` is worth calling** after a batch of removals: a depth-first
-  walk goes from 3.8 to 2.5 ns per node, and in the benchmark it returned
+  walk goes from 3.7 to 1.3 ns per node, and in the benchmark it returned
   37449 slots to 1365.
 
 ## Development

@@ -1,57 +1,36 @@
-# Suggested improvements
+# Improvements
 
-Ordered by effect on the numbers in the README. Improvements 1 and 7 are
-**done**;
-the rest are proposals, and the port otherwise kept the original design apart
-from the five bug fixes in [`migration.md`](migration.md).
+What has been done, what is still worth doing, and one idea the measurements
+killed. All numbers are release builds (`-D ASSERT=none`), which is what
+`pixi run bench` uses; figures quoted in older commits were taken with bounds
+checking on and read roughly 2× slower.
 
-## 1. Appending a child walked the whole sibling chain — fixed
+## Done
 
-`add_child` puts the new node last, and finding "last" meant walking from the
-first child:
+### Appending a child is O(1)
 
-```mojo
-while self.has_sibling(child):
-    child = Int(self._right_sibling[child])
-```
+`add_child` used to put the new node last by walking from the first child to
+the end of the sibling chain, so building a node with k children cost O(k²) — a
+root with 4000 direct children took 1224 ns per node. A `last_child` array
+caches the tail of each chain, and appending now points the current tail's
+sibling at the new node and updates the tail.
 
-Building a node with k children therefore cost O(k²): a root with 4000 direct
-children took **1224 ns per node against a child-list tree's 7.2**. Bushy trees
-never noticed, but a wide one — a directory with thousands of entries, a parse
-tree with a long argument list — fell off a cliff.
-
-**The fix**, now implemented, is a `last_child` array holding the tail of each
-child chain. Appending points the current tail's sibling at the new node and
-updates the tail, both O(1):
-
-```mojo
-def _append_child(mut self, parent: Int, node: Int):
-    var last = Int(self._last_child[parent])
-    if last == parent:
-        self._left_child[parent] = Self.Index(node)
-    else:
-        self._right_sibling[last] = Self.Index(node)
-    self._last_child[parent] = Self.Index(node)
-```
-
-| build, one root with 4000 children | before | after |
+| build, one root with 4000 children | LCRSTree | nodes owning a `List` |
 | --- | --- | --- |
-| LCRSTree | 1224.2 ns/node | **12.2 ns/node** |
+| before | 1224 ns/node | 7.2 |
+| now | **2.9 ns/node** | 6.8 |
 
-The bushy build is unchanged (10.3 ns/node), and a node grew from 20 to 24
-bytes — still half a child-list tree's 48 plus its per-parent allocation.
+Every operation that can change which node ends a chain maintains the tail:
+`_append_child`, `_detach`, `prepend_root`, `add_tree`, `swap_nodes` and
+`_compact`. `assert_consistent` checks the cached tail against the real chain
+for every node, so a missed site fails whichever test touches it.
 
-The cost is that every operation which can change *which node ends a chain* now
-has to maintain the tail: `_append_child`, `_detach`, `prepend_root`,
-`add_tree`, `swap_nodes` and `_compact`. `assert_consistent` in the test suite
-checks the cached tail against the real chain for every node, and ten tests
-append after each of those operations.
+### Removal is O(1) when you ask for it
 
-**The same treatment for removal, opt in.** `_detach` still had to find what
-precedes the node being unhooked, so `remove` and `swap_nodes` stayed O(k). A
-backward link fixes that, but it is only worth four bytes a node to trees that
-actually remove from wide chains — so it is a compile-time parameter rather
-than a second unconditional array:
+`_detach` had to find what precedes a node by scanning its parent's child
+chain, leaving `remove` and `swap_nodes` O(number of siblings). A backward link
+fixes that, and is opt in because it is only worth four bytes a node to trees
+that actually remove from wide chains:
 
 ```mojo
 LCRSTree[Int, DType.uint32, True]   # track_previous_sibling
@@ -59,96 +38,152 @@ LCRSTree[Int, DType.uint32, True]   # track_previous_sibling
 
 | remove 2000 children of a 4000-child node, back to front | ns per removal |
 | --- | --- |
-| off (the default) | 1718.4 |
-| on | **110.9** |
+| off (the default) | 732.4 |
+| on | **91.1** |
 
-Every site that maintains the forward link now maintains the backward one
-inside a `comptime if`, so with the parameter off the array stays empty and the
-maintenance compiles away entirely — the cost of the default is an empty `List`
-header per tree, not per node. `assert_consistent` checks the backward links
-against the real chain when they are on, and the whole mutation surface is
-exercised twice, once under each setting.
+With the parameter off, the backward region is not reserved at all — the link
+buffer has five regions instead of six — and every line maintaining it compiles
+away inside a `comptime if`. Direction matters: removing front to back barely
+notices, because the forward scan stops immediately. The number above is the
+worst case.
 
-Direction matters: removing front to back barely notices the difference, since
-the forward scan stops immediately. The number above is the worst case.
+### One allocation for every index, and no `List` anywhere
 
-## 2. Breadth-first traversal and child enumeration cost about 2×
+The tree used to hold each index array in its own `List`: seven allocations,
+seven lengths and capacities that were always equal, and a 168-byte handle.
+Every index now lives in one buffer divided into regions, the elements in
+another, and both are owned directly rather than through `List`.
 
-BFS is 4.1 ns per node against a child-list tree's 1.4, and enumerating every
-node's children is 1.5 against 0.8. Both walk sibling chains, which is inherent
-to the layout — the child-list tree reads a contiguous array instead.
+| | seven `List`s | one `List` | raw buffers |
+| --- | --- | --- | --- |
+| create and destroy 20000 eight-node trees | 872.6 ns | 219.1 ns | **98.2 ns** |
+| build a 37449-node bushy tree | 5.3 ns/node | 4.8 ns/node | **3.5 ns/node** |
+| `sizeof(LCRSTree[Int])` | 168 bytes | 64 bytes | **40 bytes** |
 
-Compaction narrows it (below), and `last_child` would not help here. If a
-workload is dominated by breadth-first passes over a wide tree, this is the
-wrong structure and the README says so.
+Growth is bulk: the elements relocate with one `unsafe_uninit_move_n`, each
+link region with one `unsafe_memcpy`. `capacity` is a constructor argument,
+`growth_percent` a compile-time parameter, and `reserve()` is public.
 
-## 3. Compaction is worth calling and nothing calls it
+Indexing was never the reason — in a release build, pointer and `List` indexing
+are indistinguishable (2.03 vs 2.04 ns per node on a preorder walk, 0.226 vs
+0.230 on a sequential sum). The win is the smaller handle, the bulk growth and
+the control. The cost is hand-written copy, move and destroy, covered by tests
+over `String` elements; the suite reports 0 leaks under macOS `leaks`.
 
-After removing half the nodes, a depth-first walk costs 3.8 ns per node; after
-`compact_dfs()` it costs 2.5, and the slot array shrank from 37449 to 1365.
-That is a 34% traversal win plus the memory, for an O(n) pass.
+One trap worth remembering: the first raw-pointer version was 20% *slower* to
+build, because `_reserve` had grown big enough that its early return stopped
+inlining into `add_child`. Splitting it into an `@always_inline` check and a
+`@no_inline` `_grow` took the bushy build from 5.8 to 3.4 ns per node.
 
-Nothing triggers it automatically. **Fix:** compact when the free list exceeds
-half the slots, the same policy suggested for the fiby tree's rebalance. The
-catch is that compaction **renumbers nodes**, so any index the caller is holding
-goes stale — it cannot be made implicit without either a generation counter on
-indices or an opt-in flag. Worth doing deliberately rather than silently.
+### Elements are borrowed, not copied
 
-## 4. `children_count` walks the chain
+`tree[i]` returns a reference, so reading a node whose element owns heap storage
+costs no copy (2.16 → 1.16 ns per `String` element) and can be mutated in
+place. `__setitem__` is gone, since assignment flows through the same
+reference.
 
-It is O(k), and it is the kind of call that ends up inside a loop. Either
-document it loudly or keep a per-node child count — another 4 bytes, updated in
-`_append_child` and `_detach`. The count also makes `subtree_size` cheap to
-maintain, which several of the missing operations below want.
+That also makes a tree which does not own its elements expressible.
+`BorrowedTree[T, origin]` — a `comptime` alias for `LCRSTree[Pointer[T,
+origin]]` with a `borrowed_tree(span)` constructor — threads the storage's
+origin through the tree's own type, so the compiler keeps the storage alive as
+long as the tree needs it and rejects a tree that would outlive it. The borrow
+is necessarily immutable: with a mutable origin the tree's type embeds a
+mutable reference to the storage, so `add_child` is rejected for passing it
+mutably twice.
 
-## 4d. A tree that borrows its elements
+The pointers have to come from a `Span`; `Pointer(to=collection[i])` carries an
+interior origin that will not match the collection's own.
 
-`LCRSTree[T]` never requires `T` to be a value it owns. Two shapes work today
-with no library change:
+## Killed by measurement
 
-- `LCRSTree[Int]`, where the element is an index into storage the caller owns.
-- `LCRSTree[Pointer[T, MutUntrackedOrigin]]`, where it is a pointer.
+### Breadth-first traversal and child enumeration were *not* 2× slower
 
-The index form is the one to reach for. The pointer form needs the origin
-erased — a tracked origin makes the tree itself count as aliasing the storage,
-so `add_child` is rejected for passing it mutably twice — and erasing it costs
-the lifetime check: Mojo destroys the referenced collection after its last
-mention, which is typically *before* the tree is done with it. That is a
-runtime crash with no diagnostic, and a test in this repository documents it.
+This document used to claim BFS cost 4.1 ns per node against a child-list
+tree's 1.4, and child enumeration 1.5 against 0.8, as an inherent cost of
+walking sibling chains. Both numbers predated the storage work and were taken
+with bounds checking on. Measured now:
 
-A dedicated borrowing type could keep the origin honest by threading it through
-the tree's own parameters, the way the iterators already do. Worth doing only
-if the pointer form turns out to be needed; the index form has none of these
-problems.
+| | LCRSTree | nodes owning a `List` |
+| --- | --- | --- |
+| breadth-first walk | **0.9** | 1.0 |
+| enumerate every node's children | **0.7** | 0.7 |
 
-## 5. Missing operations
+Sibling chains are not the liability they looked like: the links are dense
+`uint32` regions, and walking one is a sequential scan. Nothing to fix.
 
-The structure supports these naturally and does not expose them:
+### An intrusive free list
 
-- `move_node(node, new_parent)` — currently a remove plus a rebuild, though the
+Storing "next free slot" inside a freed slot's own link would drop the free
+region entirely. It makes claiming a slot a serially dependent pointer chase
+instead of a dense LIFO scan:
+
+| claim 500k freed slots | ns per slot |
+| --- | --- |
+| separate free region | **0.49** |
+| intrusive, freed in address order | 0.55 |
+| intrusive, freed in scattered order | **7.89** |
+
+16× worse in the case that matters, since subtrees removed over a tree's life
+do not free slots in address order.
+
+## Open, most worthwhile first
+
+### 1. Postorder traversal, and the operations that need subtree sizes
+
+Preorder and breadth-first are exposed; postorder is not, and it is what most
+tree-shaped algorithms actually want — evaluation, layout, bottom-up folding,
+freeing. The parent links make it as stack-free as `dfs()`: descend to the
+leftmost leaf, then repeatedly take the next sibling's leftmost leaf, or climb.
+
+Alongside it, `subtree_size(index)` and `leaves()`. A per-node subtree count
+would make `subtree_size` O(1) at four bytes a node — but it has to be
+maintained by every structural operation, so it should wait until something
+needs it.
+
+This is the biggest gap between what the structure can do and what it exposes.
+
+### 2. Editing operations
+
+- `move_node(node, new_parent)` — a remove plus a rebuild today, though the
   links to change are exactly the ones `swap_nodes` already touches.
 - `insert_child_at(parent, k, element)` and `insert_before/after(sibling)` —
-  ordered insertion, not just append.
+  ordered insertion, not just append. Anything DOM- or AST-shaped needs it.
 - `first_child(index)` / `next_sibling(index)` as public accessors, so callers
-  can write their own walks without `children()`.
-- `leaves()`, `subtree_size(index)`, `postorder()` — postorder in particular is
-  what most tree-shaped algorithms (evaluation, layout, freeing) actually want,
-  and the parent links make it as stack-free as preorder.
-- `Writable` on the tree itself, so `print(tree)` works and `print_tree` becomes
-  a thin wrapper.
+  can write their own walks without going through `children()`.
 
-## 6. Smaller items
+Each is a handful of lines against links that already exist, and each is a real
+hole: right now a tree can only be built top-down and appended to.
 
-- `remove` frees slots but never shrinks the arrays; only compaction does.
-  `capacity()` exposes the gap, but a `shrink_to_fit` would be kinder.
-- ~~`__getitem__` returns a copy, so reading a `String` node allocates.~~ Done:
-  it returns a reference now. The obstacle used to be that `List.__getitem__`
-  vends an interior origin that cannot widen to the whole-tree origin an
-  accessor needs; owning the element buffer directly removed it. Reading
-  `String` elements went from 2.16 to 1.16 ns each, and `__setitem__` could go
-  entirely, since assignment flows through the same reference.
-- `add_tree` copies the source tree's free list along with its nodes, so
+### 3. A compaction policy
+
+After removing half the nodes, a depth-first walk costs 3.7 ns per node; after
+`compact_dfs()` it costs 1.3, and the slot array went from 37449 to 1365. That
+is a 2.8× traversal win plus the memory, for one O(n) pass — and nothing
+triggers it.
+
+The catch is that compaction **renumbers nodes**, so any index a caller is
+holding goes stale. It cannot be silent. The honest shapes are a
+`compact_if_fragmented()` the caller invokes, or a `fragmentation()` accessor
+plus documentation. A generation counter on indices would make it safe to
+automate, and costs more than it is worth here.
+
+### 4. Smaller items
+
+- **`shrink_to_fit`.** `remove` frees slots but never returns memory; only
+  compaction does, and only as a side effect. Cheap now that the buffers are
+  owned directly.
+- **The free region is reserved at full capacity** even by a tree that never
+  removes anything, which is why a node costs 28 bytes rather than 24. It could
+  be allocated lazily on the first `remove`, at the price of a branch in
+  `_grow`.
+- **`add_tree` copies the source's free list** along with its nodes, so
   grafting a tree that has had removals carries the holes over. Compacting the
-  source first avoids it; `add_tree` could just do that.
-- The `debug_assert` guarding index-type overflow disappears in release builds.
-  For `uint16` indices a real check is cheap next to the three appends.
+  source first avoids it; `add_tree` could do that itself.
+- **`Writable` on the tree**, so `print(tree)` works and `print_tree` becomes a
+  thin wrapper.
+- **`children_count` is O(k)**, and it is the kind of call that ends up in a
+  loop. Document it loudly, or keep a per-node child count — the same four
+  bytes as the subtree size above, and the same argument for waiting.
+- **The index-overflow `debug_assert` disappears in release builds.** For
+  `uint16` indices a real check is cheap next to the work `_claim_slot` already
+  does.
