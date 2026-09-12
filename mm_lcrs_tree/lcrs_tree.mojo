@@ -219,25 +219,23 @@ struct LCRSTree[
         """
         return self._count - self._free_count
 
-    def __getitem__(self, index: Int) -> Self.T:
-        """Returns a copy of the element at `index`.
+    def __getitem__(ref self, index: Int) -> ref[self] Self.T:
+        """Returns a reference to the element at `index`.
+
+        Nothing is copied, so reading a node whose element owns heap storage
+        costs nothing, and the reference is mutable when the tree is:
+
+        ```mojo
+        tree[node] += " suffix"
+        ```
 
         Args:
             index: The node index.
 
         Returns:
-            The element stored there.
+            A reference to the element stored there, borrowed from the tree.
         """
-        return self._elements.unsafe_offset(index)[].copy()
-
-    def __setitem__(mut self, index: Int, element: Self.T):
-        """Replaces the element at `index`.
-
-        Args:
-            index: The node index.
-            element: The new element.
-        """
-        self._elements.unsafe_offset(index)[] = element.copy()
+        return self._elements[unsafe_offset=index]
 
     def capacity(self) -> Int:
         """Returns the number of node slots, live and free.

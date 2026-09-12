@@ -80,6 +80,36 @@ LCRSTree[Int]                   # uint32 indices (default): ~4.3B nodes
 LCRSTree[Int, DType.uint16]     # quarter the link memory, 65535 nodes max
 ```
 
+### Trees that do not own their elements
+
+`tree[i]` returns a reference rather than a copy, so reading a node whose
+element owns heap storage costs nothing and can be mutated in place:
+
+```mojo
+tree[node] += "-suffix"       # no copy, no allocation
+```
+
+If the values live somewhere else entirely, make the element type a reference
+to them. The tree then stores only structure:
+
+```mojo
+# Indices into storage you own -- simplest, and nothing to get wrong.
+var tree = LCRSTree[Int](0)
+for index in tree.dfs():
+    print(my_values[tree[index]])
+
+# Or pointers, when an index is not natural.
+var tree = LCRSTree[Pointer[String, MutUntrackedOrigin]](
+    Pointer(to=words[0]).unsafe_origin_cast[MutUntrackedOrigin]()
+)
+```
+
+**Prefer the index form.** The pointer form erases the origin, and Mojo
+destroys a value after its last use — so a `List` you took pointers into is
+destroyed as soon as you stop mentioning it, leaving the tree pointing at freed
+storage, with no compile error. Keeping it alive is then your job. Indices have
+no such hazard.
+
 ### Growth
 
 ```mojo
@@ -126,7 +156,8 @@ remove sits far along the chain.
 | `add_tree(other, parent=0) -> Int` | Graft a copy of another tree in. |
 | `prepend_root(element) -> Int` | Insert a new root above the current one. |
 | `remove(index)` | Drop a node and its subtree; slots go on the free list. Removing something already gone does nothing. O(siblings) unless backward links are on. |
-| `tree[i]`, `tree[i] = x`, `len(tree)`, `capacity()` | Element access, live nodes, slot count. |
+| `tree[i]` | A **reference** to the element: no copy on read, mutable in place, and `tree[i] = x` assigns through it. |
+| `len(tree)`, `capacity()` | Live nodes, slot count. |
 | `for index in tree` / `tree.dfs(root=0)` | Depth-first preorder; uses parent links, so no stack and no recursion. |
 | `tree.bfs(root=0)` | Breadth-first. |
 | `tree.children(index)` | A node's children, without allocating. |

@@ -101,6 +101,26 @@ document it loudly or keep a per-node child count — another 4 bytes, updated i
 `_append_child` and `_detach`. The count also makes `subtree_size` cheap to
 maintain, which several of the missing operations below want.
 
+## 4d. A tree that borrows its elements
+
+`LCRSTree[T]` never requires `T` to be a value it owns. Two shapes work today
+with no library change:
+
+- `LCRSTree[Int]`, where the element is an index into storage the caller owns.
+- `LCRSTree[Pointer[T, MutUntrackedOrigin]]`, where it is a pointer.
+
+The index form is the one to reach for. The pointer form needs the origin
+erased — a tracked origin makes the tree itself count as aliasing the storage,
+so `add_child` is rejected for passing it mutably twice — and erasing it costs
+the lifetime check: Mojo destroys the referenced collection after its last
+mention, which is typically *before* the tree is done with it. That is a
+runtime crash with no diagnostic, and a test in this repository documents it.
+
+A dedicated borrowing type could keep the origin honest by threading it through
+the tree's own parameters, the way the iterators already do. Worth doing only
+if the pointer form turns out to be needed; the index form has none of these
+problems.
+
 ## 5. Missing operations
 
 The structure supports these naturally and does not expose them:
@@ -121,10 +141,12 @@ The structure supports these naturally and does not expose them:
 
 - `remove` frees slots but never shrinks the arrays; only compaction does.
   `capacity()` exposes the gap, but a `shrink_to_fit` would be kinder.
-- `__getitem__` returns a copy, so reading a `String` node allocates. Returning
-  a reference would avoid it, but `List.__getitem__` vends an interior origin
-  that cannot widen to the whole-tree origin an accessor needs — the same
-  constraint the stdlib's `_DequeIter` documents.
+- ~~`__getitem__` returns a copy, so reading a `String` node allocates.~~ Done:
+  it returns a reference now. The obstacle used to be that `List.__getitem__`
+  vends an interior origin that cannot widen to the whole-tree origin an
+  accessor needs; owning the element buffer directly removed it. Reading
+  `String` elements went from 2.16 to 1.16 ns each, and `__setitem__` could go
+  entirely, since assignment flows through the same reference.
 - `add_tree` copies the source tree's free list along with its nodes, so
   grafting a tree that has had removals carries the holes over. Compacting the
   source first avoids it; `add_tree` could just do that.

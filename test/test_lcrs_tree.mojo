@@ -117,6 +117,59 @@ def test_element_access() raises:
     assert_equal(tree[4], 40)
 
 
+def test_element_access_returns_a_reference() raises:
+    """`tree[i]` hands back a reference, so it can be mutated in place and
+    reading a heap-owning element costs no copy."""
+    var tree = LCRSTree[String]("root")
+    var node = tree.add_child("alpha")
+    tree[node] += "-suffix"
+    assert_equal(tree[node], "alpha-suffix")
+    # Assignment still works; it goes through the same reference.
+    tree[node] = "replaced"
+    assert_equal(tree[node], "replaced")
+
+
+def test_elements_can_be_pointers_into_foreign_storage() raises:
+    """A tree that records structure between values it does not own.
+
+    Nothing here is copied: the elements are pointers, so the tree is pure
+    structure over storage that outlives it.
+    """
+    var words: List[String] = ["one", "two", "three"]
+    var tree = LCRSTree[Pointer[String, MutUntrackedOrigin]](
+        Pointer(to=words[0]).unsafe_origin_cast[MutUntrackedOrigin]()
+    )
+    var child = tree.add_child(
+        Pointer(to=words[1]).unsafe_origin_cast[MutUntrackedOrigin]()
+    )
+    _ = tree.add_child(
+        Pointer(to=words[2]).unsafe_origin_cast[MutUntrackedOrigin](), child
+    )
+    var seen = List[String]()
+    for index in tree.dfs():
+        seen.append(tree[index][])
+    assert_equal(len(seen), 3)
+    assert_equal(seen[0], "one")
+    assert_equal(seen[1], "two")
+    assert_equal(seen[2], "three")
+    # `words` must outlive the tree, and an erased origin will not enforce
+    # that: without a use here Mojo destroys it after the last `Pointer(to=)`
+    # above, leaving the tree pointing at freed storage.
+    assert_equal(words[0], "one")
+
+
+def test_elements_can_be_indices_into_foreign_storage() raises:
+    var words: List[String] = ["one", "two", "three"]
+    var tree = LCRSTree[Int](0)
+    var child = tree.add_child(1)
+    _ = tree.add_child(2, child)
+    var seen = List[String]()
+    for index in tree.dfs():
+        seen.append(words[tree[index]])
+    assert_equal(seen[0], "one")
+    assert_equal(seen[2], "three")
+
+
 def test_ancestors_and_depth() raises:
     var tree = sample()
     assert_indices(tree.ancestor_indices(4), [1, 0])
