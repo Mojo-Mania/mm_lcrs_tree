@@ -612,6 +612,83 @@ def test_narrow_index_type() raises:
     assert_equal(tree.children_count(0), 1000)
 
 
+def test_capacity_argument_avoids_growth() raises:
+    var tree = LCRSTree[Int](0, capacity=64)
+    assert_equal(tree._capacity, 64)
+    for i in range(63):
+        _ = tree.add_child(i)
+    assert_equal(tree._capacity, 64, "should not have reallocated")
+    _ = tree.add_child(99)
+    assert_true(tree._capacity > 64)
+    assert_consistent(tree)
+
+
+def test_small_capacity_is_clamped() raises:
+    var tree = LCRSTree[Int](0, capacity=0)
+    assert_true(tree._capacity >= 1)
+    for i in range(50):
+        _ = tree.add_child(i)
+    assert_equal(len(tree), 51)
+    assert_consistent(tree)
+
+
+def test_growth_percent_controls_capacity() raises:
+    var doubling = LCRSTree[Int](0, capacity=4)
+    var gentle = LCRSTree[Int](0, capacity=4, growth_percent=150)
+    for i in range(200):
+        _ = doubling.add_child(i)
+        _ = gentle.add_child(i)
+    assert_equal(len(doubling), 201)
+    assert_equal(len(gentle), 201)
+    # A gentler factor tracks the node count more closely.
+    assert_true(
+        gentle._capacity <= doubling._capacity,
+        String(
+            "150% grew to ",
+            gentle._capacity,
+            " but 200% grew to ",
+            doubling._capacity,
+        ),
+    )
+    assert_consistent(doubling)
+    assert_consistent(gentle)
+
+
+def test_reserve() raises:
+    var tree = LCRSTree[Int](0, capacity=2)
+    tree.reserve(500)
+    assert_true(tree._capacity >= 500)
+    for i in range(499):
+        _ = tree.add_child(i)
+    assert_equal(tree._capacity, 500)
+    assert_consistent(tree)
+
+
+def test_string_elements_survive_growth_and_copy() raises:
+    """Exercises the element buffer's move, copy and destroy paths.
+
+    Heap-owning elements make a missed destructor a leak and a double-run a
+    crash, so this is the shape that catches lifecycle mistakes.
+    """
+    var tree = LCRSTree[String]("root", capacity=2)
+    for i in range(200):
+        _ = tree.add_child(String("node-with-a-long-enough-name-", i))
+    assert_equal(len(tree), 201)
+    assert_equal(tree[1], "node-with-a-long-enough-name-0")
+    assert_equal(tree[200], "node-with-a-long-enough-name-199")
+
+    var duplicate = tree.copy()
+    tree.remove(1)
+    assert_equal(duplicate[1], "node-with-a-long-enough-name-0")
+    duplicate[1] = "replaced"
+    assert_equal(duplicate[1], "replaced")
+
+    var moved = duplicate^
+    assert_equal(moved[2], "node-with-a-long-enough-name-1")
+    moved.compact_dfs()
+    assert_equal(len(moved), 201)
+
+
 def test_copy_is_independent() raises:
     var tree = sample()
     var duplicate = tree.copy()
@@ -703,11 +780,9 @@ def test_mutations_with_backward_links() raises:
 
 
 def test_backward_links_cost_nothing_when_off() raises:
-    """With the parameter off the link buffer has one region fewer."""
-    var plain = sample[False]()
-    var tracked = sample[True]()
-    assert_equal(len(plain._links), plain._capacity * 5)
-    assert_equal(len(tracked._links), tracked._capacity * 6)
+    """With the parameter off the link buffer reserves one region fewer."""
+    assert_equal(LCRSTree[Int]._REGIONS, 5)
+    assert_equal(LCRSTree[Int, DType.uint32, True]._REGIONS, 6)
 
 
 def test_both_settings_agree_on_shape() raises:

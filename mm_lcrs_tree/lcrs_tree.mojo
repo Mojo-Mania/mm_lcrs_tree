@@ -27,6 +27,14 @@ for index in tree.dfs():
 ```
 """
 
+from std.memory import (
+    unsafe_destroy_n,
+    unsafe_memcpy,
+    unsafe_uninit_copy_n,
+    unsafe_uninit_move_n,
+)
+from std.memory.alloc import Layout, ThinAllocation, alloc, dealloc
+
 
 struct LCRSTree[
     T: Copyable & Deinitable,
@@ -47,7 +55,8 @@ struct LCRSTree[
             and `swap_nodes` O(number of siblings). Turning it on makes both
             O(1) for another index per node. When it is off the array stays
             empty and every line maintaining it compiles away, so the default
-            costs nothing but the empty `List` header.
+            costs nothing but the region it does not reserve.
+
 
     A tree always has a root, so it is never empty; construct it with the root
     element. Nodes are referred to by index, which stays stable until
@@ -79,37 +88,130 @@ struct LCRSTree[
     comptime _REGIONS = 6 if Self.track_previous_sibling else 5
     """How many regions the link buffer is divided into."""
 
-    var _elements: List[Self.T]
-    """The element of every node slot. Kept apart from the links so `T`'s
-    destructors, copies and moves stay the compiler's responsibility."""
-    var _links: List[Self.Index]
+    var _elements: Pointer[Self.T, MutUntrackedOrigin]
+    """The element of every node slot; `_count` of them are initialized."""
+    var _links: Pointer[Self.Index, MutUntrackedOrigin]
     """Every index the tree needs, in one allocation: `_REGIONS` regions of
     `_capacity` entries each, in the order given by the region constants. A
     node link that points at its own node means "none"."""
     var _capacity: Int
-    """Entries per region. The slot count is `len(self._elements)`."""
+    """Slots the buffers can hold, and the stride between link regions."""
+    var _count: Int
+    """Slots in use, live and free."""
     var _free_count: Int
     """How many entries of the free region are in use."""
+    var _growth_percent: Int
+    """How much to grow the buffers by when they fill, as a percentage of the
+    current capacity. 200 doubles."""
 
     # ===-------------------------------------------------------------------===#
     # Lifecycle
     # ===-------------------------------------------------------------------===#
 
-    def __init__(out self, root: Self.T):
+    def __init__(
+        out self, root: Self.T, *, capacity: Int = 8, growth_percent: Int = 200
+    ):
         """Constructs a tree holding a single root node.
 
         Args:
             root: The element to store at the root.
+            capacity: Slots to allocate up front. Passing the eventual node
+                count avoids every intermediate reallocation.
+            growth_percent: How much to grow by when the buffers fill, as a
+                percentage of the current capacity; 200 doubles. One buffer
+                holds every link region, so over-allocating costs `_REGIONS`
+                times what it would for a single array -- 150 wastes far less
+                on a large tree, and pairs well with an honest `capacity`.
         """
-        self._elements = [root.copy()]
-        self._links = []
-        self._capacity = 0
+        debug_assert(
+            growth_percent > 100,
+            (
+                "LCRSTree: growth_percent must exceed 100 or the buffers cannot"
+                " grow"
+            ),
+        )
+        var slots = capacity if capacity > 1 else 1
+        self._elements = Self._alloc_elements(slots)
+        self._links = Self._alloc_links(slots)
+        self._capacity = slots
+        self._count = 1
         self._free_count = 0
-        self._reserve(1)
+        self._growth_percent = growth_percent if growth_percent > 100 else 200
+        self._elements.unsafe_offset(0).unsafe_write(root.copy())
         # Every link of the root points at the root: it has no child, no
         # sibling and no parent.
         for region in range(Self._REGIONS):
             self._set(region, 0, 0)
+
+    def __init__(out self, *, copy: Self):
+        """Constructs an independent copy of `copy`.
+
+        Args:
+            copy: The tree to duplicate.
+        """
+        self._capacity = copy._capacity
+        self._count = copy._count
+        self._free_count = copy._free_count
+        self._growth_percent = copy._growth_percent
+        self._elements = Self._alloc_elements(copy._capacity)
+        self._links = Self._alloc_links(copy._capacity)
+        unsafe_uninit_copy_n[overlapping=False](
+            dest=self._elements, src=copy._elements, count=copy._count
+        )
+        unsafe_memcpy(
+            dest=self._links,
+            src=copy._links,
+            count=copy._capacity * Self._REGIONS,
+        )
+
+    def __init__(out self, *, deinit move: Self):
+        """Takes over `move`'s storage.
+
+        Args:
+            move: The tree to move from.
+        """
+        self._elements = move._elements
+        self._links = move._links
+        self._capacity = move._capacity
+        self._count = move._count
+        self._free_count = move._free_count
+        self._growth_percent = move._growth_percent
+
+    def __deinit__(deinit self):
+        """Destroys the live elements and releases both buffers."""
+        unsafe_destroy_n(self._elements, self._count)
+        Self._free_elements(self._elements, self._capacity)
+        Self._free_links(self._links, self._capacity)
+
+    @staticmethod
+    def _alloc_elements(slots: Int) -> Pointer[Self.T, MutUntrackedOrigin]:
+        return alloc(Layout[Self.T](count=slots)).unsafe_leak()
+
+    @staticmethod
+    def _alloc_links(slots: Int) -> Pointer[Self.Index, MutUntrackedOrigin]:
+        return alloc(
+            Layout[Self.Index](count=slots * Self._REGIONS)
+        ).unsafe_leak()
+
+    @staticmethod
+    def _free_elements(
+        var pointer: Pointer[Self.T, MutUntrackedOrigin], slots: Int
+    ):
+        dealloc(
+            ThinAllocation(unsafe_owned_ptr=pointer).unsafe_with_layout(
+                Layout[Self.T](count=slots)
+            )
+        )
+
+    @staticmethod
+    def _free_links(
+        var pointer: Pointer[Self.Index, MutUntrackedOrigin], slots: Int
+    ):
+        dealloc(
+            ThinAllocation(unsafe_owned_ptr=pointer).unsafe_with_layout(
+                Layout[Self.Index](count=slots * Self._REGIONS)
+            )
+        )
 
     # ===-------------------------------------------------------------------===#
     # Size and element access
@@ -122,7 +224,7 @@ struct LCRSTree[
         Returns:
             The node count, excluding slots on the free list.
         """
-        return len(self._elements) - self._free_count
+        return self._count - self._free_count
 
     def __getitem__(self, index: Int) -> Self.T:
         """Returns a copy of the element at `index`.
@@ -133,7 +235,7 @@ struct LCRSTree[
         Returns:
             The element stored there.
         """
-        return self._elements[index].copy()
+        return self._elements.unsafe_offset(index)[].copy()
 
     def __setitem__(mut self, index: Int, element: Self.T):
         """Replaces the element at `index`.
@@ -142,7 +244,7 @@ struct LCRSTree[
             index: The node index.
             element: The new element.
         """
-        self._elements[index] = element.copy()
+        self._elements.unsafe_offset(index)[] = element.copy()
 
     def capacity(self) -> Int:
         """Returns the number of node slots, live and free.
@@ -152,7 +254,7 @@ struct LCRSTree[
         Returns:
             The slot count.
         """
-        return len(self._elements)
+        return self._count
 
     # ===-------------------------------------------------------------------===#
     # Structure queries
@@ -411,11 +513,16 @@ struct LCRSTree[
         Returns:
             The index of the copied tree's root.
         """
-        var offset = len(self._elements)
-        var incoming = len(other._elements)
+        var offset = self._count
+        var incoming = other._count
         self._reserve(offset + incoming)
+        unsafe_uninit_copy_n[overlapping=False](
+            dest=self._elements.unsafe_offset(offset),
+            src=other._elements,
+            count=incoming,
+        )
+        self._count += incoming
         for i in range(incoming):
-            self._elements.append(other._elements[i].copy())
             for region in range(Self._REGIONS):
                 if region == Self._FREE:
                     continue
@@ -444,7 +551,7 @@ struct LCRSTree[
         Returns:
             The index the old root moved to.
         """
-        var old_root = self._elements[0].copy()
+        var old_root = self._elements.unsafe_offset(0)[].copy()
         # A self-pointer means "no child", so the old root's sentinel cannot be
         # copied verbatim: at its new index it would point at the new root and
         # close a cycle. Read the real child before claiming the slot.
@@ -459,7 +566,7 @@ struct LCRSTree[
         self._set_right(moved, moved)
         self._set_parent(moved, 0)
 
-        self._elements[0] = element.copy()
+        self._elements.unsafe_offset(0)[] = element.copy()
         self._set_left(0, moved)
         self._set_last(0, moved)
         self._set_right(0, 0)
@@ -499,8 +606,9 @@ struct LCRSTree[
         if index == 0:
             # The 2023 version cleared the node arrays but left the free list
             # populated, so the next insert reused an out-of-range slot.
-            var root_element = self._elements[0].copy()
-            self._elements = [root_element^]
+            # Destroy every slot but the root, which keeps its element.
+            unsafe_destroy_n(self._elements.unsafe_offset(1), self._count - 1)
+            self._count = 1
             self._free_count = 0
             for region in range(Self._REGIONS):
                 self._set(region, 0, 0)
@@ -521,7 +629,11 @@ struct LCRSTree[
             a: The first node index.
             b: The second node index.
         """
-        self._elements.swap_elements(a, b)
+        var left = self._elements.unsafe_offset(a)
+        var right = self._elements.unsafe_offset(b)
+        var temporary = left[].copy()
+        left[] = right[].copy()
+        right[] = temporary^
 
     def swap_nodes(mut self, a: Int, b: Int) -> Bool:
         """Exchanges two nodes, moving their subtrees with them.
@@ -626,28 +738,30 @@ struct LCRSTree[
     @always_inline
     def _get(self, region: Int, index: Int) -> Int:
         """Reads one entry of one region."""
-        return Int(self._links[region * self._capacity + index])
+        return Int(self._links.unsafe_offset(region * self._capacity + index)[])
 
     @always_inline
     def _set(mut self, region: Int, index: Int, value: Int):
         """Writes one entry of one region."""
-        self._links[region * self._capacity + index] = Self.Index(value)
+        self._links.unsafe_offset(
+            region * self._capacity + index
+        )[] = Self.Index(value)
 
     @always_inline
     def _left(self, node: Int) -> Int:
-        return Int(self._links[node])
+        return Int(self._links.unsafe_offset(node)[])
 
     @always_inline
     def _set_left(mut self, node: Int, value: Int):
-        self._links[node] = Self.Index(value)
+        self._links.unsafe_offset(node)[] = Self.Index(value)
 
     @always_inline
     def _right(self, node: Int) -> Int:
-        return Int(self._links[self._capacity + node])
+        return Int(self._links.unsafe_offset(self._capacity + node)[])
 
     @always_inline
     def _set_right(mut self, node: Int, value: Int):
-        self._links[self._capacity + node] = Self.Index(value)
+        self._links.unsafe_offset(self._capacity + node)[] = Self.Index(value)
 
     @always_inline
     def _prev(self, node: Int) -> Int:
@@ -669,47 +783,73 @@ struct LCRSTree[
     def _set_parent(mut self, node: Int, value: Int):
         self._set(Self._PARENT, node, value)
 
-    def _reserve(mut self, needed: Int):
-        """Grows the link buffer so every region holds `needed` entries."""
-        if needed <= self._capacity:
-            return
-        var capacity = 8 if self._capacity == 0 else self._capacity * 2
-        while capacity < needed:
-            capacity *= 2
+    def reserve(mut self, slots: Int):
+        """Grows the buffers so the tree can hold `slots` nodes without
+        reallocating.
 
-        var links = List[Self.Index](
-            length=capacity * Self._REGIONS, fill=Self.Index(0)
+        Args:
+            slots: The node count to make room for.
+        """
+        self._reserve(slots)
+
+    @always_inline
+    def _reserve(mut self, needed: Int):
+        """Makes room for `needed` slots, growing only when it has to.
+
+        The check is inlined into the callers; the growth itself is kept out of
+        line so the common path stays a single comparison.
+        """
+        if needed > self._capacity:
+            self._grow(needed)
+
+    @no_inline
+    def _grow(mut self, needed: Int):
+        """Reallocates both buffers to hold at least `needed` slots.
+
+        The element buffer moves in one bulk relocation and each link region in
+        one `memcpy`, rather than an entry at a time.
+        """
+        var capacity = self._capacity * self._growth_percent // 100
+        if capacity < needed:
+            capacity = needed
+
+        var elements = Self._alloc_elements(capacity)
+        unsafe_uninit_move_n[overlapping=False](
+            dest=elements, src=self._elements, count=self._count
         )
-        var slots = len(self._elements)
-        if slots > self._capacity:
-            slots = self._capacity
-        if self._capacity > 0:
-            for region in range(Self._REGIONS):
-                var old_base = region * self._capacity
-                var new_base = region * capacity
-                var used = self._free_count if region == Self._FREE else slots
-                for i in range(used):
-                    links[new_base + i] = self._links[old_base + i]
-        self._links = links^
+        Self._free_elements(self._elements, self._capacity)
+        self._elements = elements
+
+        var links = Self._alloc_links(capacity)
+        for region in range(Self._REGIONS):
+            var used = self._free_count if region == Self._FREE else self._count
+            unsafe_memcpy(
+                dest=links.unsafe_offset(region * capacity),
+                src=self._links.unsafe_offset(region * self._capacity),
+                count=used,
+            )
+        Self._free_links(self._links, self._capacity)
+        self._links = links
         self._capacity = capacity
 
     def _claim_slot(mut self, element: Self.T) -> Int:
         """Returns a fresh node slot, reusing a freed one when available."""
         if self._free_count == 0:
-            var index = len(self._elements)
+            var index = self._count
             debug_assert(
                 index <= Int(Self.Index.MAX),
                 "LCRSTree: node index type is too narrow for this many nodes",
             )
             self._reserve(index + 1)
-            self._elements.append(element.copy())
+            self._elements.unsafe_offset(index).unsafe_write(element.copy())
+            self._count += 1
             for region in range(Self._REGIONS):
                 if region != Self._FREE:
                     self._set(region, index, index)
             return index
         self._free_count -= 1
         var index = self._get(Self._FREE, self._free_count)
-        self._elements[index] = element.copy()
+        self._elements.unsafe_offset(index)[] = element.copy()
         self._set_left(index, index)
         self._set_right(index, index)
         self._set_last(index, index)
@@ -781,32 +921,36 @@ struct LCRSTree[
     def _compact(mut self, kept: List[Int]):
         """Rebuilds the arrays so the nodes sit in the order given by `kept`."""
         var size = len(kept)
-        var mapping = List[Int](length=len(self._elements), fill=-1)
+        var mapping = List[Int](length=self._count, fill=-1)
         for new_index in range(size):
             mapping[kept[new_index]] = new_index
 
-        var elements = List[Self.T](capacity=size)
         var capacity = size if size > 0 else 1
-        var links = List[Self.Index](
-            length=capacity * Self._REGIONS, fill=Self.Index(0)
-        )
+        var elements = Self._alloc_elements(capacity)
+        var links = Self._alloc_links(capacity)
 
         for new_index in range(size):
             var old = kept[new_index]
-            elements.append(self._elements[old].copy())
+            elements.unsafe_offset(new_index).unsafe_write(
+                self._elements.unsafe_offset(old)[].copy()
+            )
             # A link leaving the kept set becomes "none", i.e. a self-pointer.
             # That is what happens to the subtree root's sibling and parent
             # when compacting to a subtree.
             for region in range(Self._REGIONS):
                 if region == Self._FREE:
                     continue
-                links[region * capacity + new_index] = self._remap(
-                    mapping, self._get(region, old), new_index
-                )
+                links.unsafe_offset(
+                    region * capacity + new_index
+                )[] = self._remap(mapping, self._get(region, old), new_index)
 
-        self._elements = elements^
-        self._links = links^
+        unsafe_destroy_n(self._elements, self._count)
+        Self._free_elements(self._elements, self._capacity)
+        Self._free_links(self._links, self._capacity)
+        self._elements = elements
+        self._links = links
         self._capacity = capacity
+        self._count = size
         self._free_count = 0
 
 
@@ -923,7 +1067,7 @@ struct _DfsIter[
         """
         self._src = src
         self._root = root
-        self._node = root if root < len(src[]._elements) else -1
+        self._node = root if root < src[]._count else -1
 
     def __iter__(ref self) -> Self.IteratorType[origin_of(self)]:
         """Returns this iterator.
@@ -989,7 +1133,7 @@ struct _BfsIter[
         """
         self._src = src
         self._queue = []
-        if root < len(src[]._elements):
+        if root < src[]._count:
             self._queue.append(root)
         self._cursor = 0
 

@@ -13,8 +13,10 @@ that reaching the k-th child is O(k).
 
 Nodes are addressed by index, and a link pointing at its own node means "none",
 so no index value is reserved as a sentinel. Every index the tree needs — child,
-sibling, tail, parent and the free list — lives in **one** `List`, divided into
-regions, so a tree is two allocations rather than one per array. Alongside the
+sibling, tail, parent and the free list — lives in **one** buffer divided into
+regions, with the elements in another, so a whole tree is two allocations and a
+48-byte handle. Growth relocates the elements in one bulk move and each link
+region in one `memcpy`. Alongside the
 two tree links this implementation keeps a `parent` array — which makes upward
 walks, removal and node swaps possible — a `last_child` array, which is the tail
 of each child chain and makes appending a child O(1), and a free list, so slots
@@ -105,7 +107,8 @@ remove sits far along the chain.
 
 | Member | Meaning |
 | --- | --- |
-| `LCRSTree[T](root)` | A tree always has a root, so it is never empty. |
+| `LCRSTree[T](root, capacity=8, growth_percent=200)` | A tree always has a root, so it is never empty. Pass the eventual node count as `capacity` to skip every reallocation. |
+| `reserve(slots)` | Make room for `slots` nodes up front. |
 | `add_child(element, parent=0) -> Int` | Append as the last child, in constant time. |
 | `add_tree(other, parent=0) -> Int` | Graft a copy of another tree in. |
 | `prepend_root(element) -> Int` | Insert a new root above the current one. |
@@ -126,20 +129,26 @@ remove sits far along the chain.
 Bushy tree of 37449 nodes (fan-out 8), Apple M-series, nanoseconds per node.
 Reproduce with `pixi run bench`.
 
+Measured in a release build (`-D ASSERT=none`); bounds checks cost this
+structure about 2x on build while being noise for the allocation-heavy
+baselines, so default-mode numbers understate it.
+
 | Operation | LCRSTree | Nodes owning a `List` | `ArcPointer` nodes |
 | --- | --- | --- | --- |
-| build | **10.3** | 24.7 | 79.1 |
-| depth-first walk | 2.4 | **2.3** | 2.8 |
-| breadth-first walk | 4.0 | **1.4** | — |
-| enumerate all children | 1.5 | **0.8** | — |
+| build | **3.4** | 25.7 | 83.6 |
+| depth-first walk | 1.8 | **1.4** | 2.6 |
+| breadth-first walk | **0.8** | 1.0 | — |
+| enumerate all children | **0.7** | **0.7** | — |
+| create + destroy 20000 8-node trees | **91.0** | 661.9 | — |
 | bytes per node | **28** | 48 + an allocation per parent | a heap node + refcount each |
+| bytes per tree handle | **48** | 72 | — |
 
 Where the shape is wide rather than bushy:
 
 | Operation (4000 direct children) | LCRSTree | Nodes owning a `List` |
 | --- | --- | --- |
-| build | 12.2 | **7.1** |
-| read the k-th child | 2177.4 | **0.9** |
+| build | **2.9** | 6.5 |
+| read the k-th child | 676.3 | **0.3** |
 
 Reading the tables:
 
@@ -158,8 +167,8 @@ Reading the tables:
 - **Indexed child access is O(k) by design.** If you need the k-th child of a
   wide node in a loop, this is the wrong structure.
 - **Small trees are cheap.** Creating and destroying 20000 eight-node trees
-  costs 219 ns each against a child-list tree's 674, because the whole tree is
-  two allocations: one for the elements, one for every index region together.
+  costs 91 ns each against a child-list tree's 662, because a whole tree is two
+  allocations: one for the elements, one for every index region together.
 - **`compact_dfs()` is worth calling** after a batch of removals: a depth-first
   walk goes from 3.8 to 2.5 ns per node, and in the benchmark it returned
   37449 slots to 1365.
@@ -167,7 +176,7 @@ Reading the tables:
 ## Development
 
 ```bash
-pixi run test     # the test suite (55 tests)
+pixi run test     # the test suite (60 tests)
 pixi run bench    # the benchmarks above
 pixi run main     # the example
 pixi run format   # mojo format
