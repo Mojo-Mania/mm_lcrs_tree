@@ -11,8 +11,10 @@ its first child followed by that child's sibling chain, so a node costs the same
 whether it has one child or a thousand, and no node owns a list. The price is
 that reaching the k-th child is O(k).
 
-Nodes live in `List`s and are addressed by index; a link pointing at its own
-node means "none", so no index value is reserved as a sentinel. Alongside the
+Nodes are addressed by index, and a link pointing at its own node means "none",
+so no index value is reserved as a sentinel. Every index the tree needs — child,
+sibling, tail, parent and the free list — lives in **one** `List`, divided into
+regions, so a tree is two allocations rather than one per array. Alongside the
 two tree links this implementation keeps a `parent` array — which makes upward
 walks, removal and node swaps possible — a `last_child` array, which is the tail
 of each child chain and makes appending a child O(1), and a free list, so slots
@@ -86,7 +88,7 @@ O(number of siblings). If that matters, ask for a backward link too:
 LCRSTree[Int, DType.uint32, True]   # track_previous_sibling
 ```
 
-Both become O(1), for one more index per node (24 → 28 bytes). It is off by
+Both become O(1), for one more index per node (28 → 32 bytes). It is off by
 default because most trees are not wide and most workloads do not remove much:
 when it is off the array stays empty and every line maintaining it compiles
 away, so you pay nothing but an empty `List` header per tree.
@@ -107,14 +109,14 @@ remove sits far along the chain.
 | `add_child(element, parent=0) -> Int` | Append as the last child, in constant time. |
 | `add_tree(other, parent=0) -> Int` | Graft a copy of another tree in. |
 | `prepend_root(element) -> Int` | Insert a new root above the current one. |
-| `remove(index)` | Drop a node and its subtree; slots go on the free list. O(siblings) unless backward links are on. |
+| `remove(index)` | Drop a node and its subtree; slots go on the free list. Removing something already gone does nothing. O(siblings) unless backward links are on. |
 | `tree[i]`, `tree[i] = x`, `len(tree)`, `capacity()` | Element access, live nodes, slot count. |
 | `for index in tree` / `tree.dfs(root=0)` | Depth-first preorder; uses parent links, so no stack and no recursion. |
 | `tree.bfs(root=0)` | Breadth-first. |
 | `tree.children(index)` | A node's children, without allocating. |
 | `get_dfs_indices()`, `get_bfs_indices()`, `children_indices()`, `ancestor_indices()` | The same as lists. |
 | `children_count()`, `depth()`, `parent_of()` | O(children), O(depth), O(1). |
-| `is_leaf/is_root/has_sibling/are_siblings` | Shape predicates. |
+| `is_leaf/is_root/has_sibling/are_siblings/is_free` | Shape predicates; `is_free` reports a released slot. |
 | `swap_elements(a, b)` / `swap_nodes(a, b) -> Bool` | Exchange contents / exchange nodes with their subtrees. Also O(siblings) unless backward links are on. |
 | `compact_dfs(root=0)` / `compact_bfs(root=0)` | Renumber into traversal order, dropping free slots. |
 | `print_tree(tree)` | Free function; needs `Writable` elements. |
@@ -130,7 +132,7 @@ Reproduce with `pixi run bench`.
 | depth-first walk | 2.4 | **2.3** | 2.8 |
 | breadth-first walk | 4.0 | **1.4** | — |
 | enumerate all children | 1.5 | **0.8** | — |
-| bytes per node | **24** | 48 + an allocation per parent | a heap node + refcount each |
+| bytes per node | **28** | 48 + an allocation per parent | a heap node + refcount each |
 
 Where the shape is wide rather than bushy:
 
@@ -155,6 +157,9 @@ Reading the tables:
   `last_child` array brought that to 12.2, at the cost of four bytes a node.
 - **Indexed child access is O(k) by design.** If you need the k-th child of a
   wide node in a loop, this is the wrong structure.
+- **Small trees are cheap.** Creating and destroying 20000 eight-node trees
+  costs 219 ns each against a child-list tree's 674, because the whole tree is
+  two allocations: one for the elements, one for every index region together.
 - **`compact_dfs()` is worth calling** after a batch of removals: a depth-first
   walk goes from 3.8 to 2.5 ns per node, and in the benchmark it returned
   37449 slots to 1365.
@@ -162,7 +167,7 @@ Reading the tables:
 ## Development
 
 ```bash
-pixi run test     # the test suite (53 tests)
+pixi run test     # the test suite (55 tests)
 pixi run bench    # the benchmarks above
 pixi run main     # the example
 pixi run format   # mojo format

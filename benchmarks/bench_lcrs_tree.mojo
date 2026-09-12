@@ -341,6 +341,40 @@ def bench_nth_child() raises:
     print("   (per lookup, not per node)")
 
 
+def bench_many_small_trees() raises:
+    """Create and destroy many small trees.
+
+    A tree's fixed cost -- one allocation per internal array -- is invisible
+    when one tree holds 37000 nodes and dominant when you hold thousands of
+    eight-node trees.
+    """
+    comptime TREES = 20_000
+    comptime NODES = 8
+    header(String("create and destroy ", TREES, " trees of ", NODES, " nodes"))
+
+    def lcrs() raises:
+        var total = 0
+        for _ in range(TREES):
+            var tree = LCRSTree[Int](0)
+            for i in range(NODES - 1):
+                _ = tree.add_child(i)
+            total += len(tree)
+        keep(total)
+
+    def child_list() raises:
+        var total = 0
+        for _ in range(TREES):
+            var tree = ChildListTree[Int](0)
+            for i in range(NODES - 1):
+                _ = tree.add_child(i)
+            total += len(tree)
+        keep(total)
+
+    report("LCRSTree", per_node(measure(lcrs), TREES))
+    report("ChildListTree", per_node(measure(child_list), TREES))
+    print("   (per tree, not per node)")
+
+
 def bench_remove_wide() raises:
     """Removing from a wide node, with and without backward sibling links.
 
@@ -387,8 +421,8 @@ def bench_compaction() raises:
         if node % 2 == 1 and not scattered.is_root(node):
             doomed.append(node)
     for node in doomed:
-        if node < scattered.capacity():
-            scattered.remove(node)
+        # Some of these went with an earlier subtree; `remove` ignores those.
+        scattered.remove(node)
 
     var compacted = scattered.copy()
     compacted.compact_dfs()
@@ -423,7 +457,7 @@ def report_memory() raises:
     var tree = build_lcrs(DEPTH, FANOUT)
     var nodes = len(tree)
     # Four arrays: one element plus three indices per node.
-    var lcrs_bytes = nodes * (8 + 4 * 4)
+    var lcrs_bytes = nodes * (8 + 5 * 4)
     # Elements, parents, and a List header per node, plus its child slots.
     var list_bytes = nodes * (8 + 8 + 24 + 8)
     print("")
@@ -444,6 +478,7 @@ def main() raises:
     bench_traversal()
     bench_children()
     bench_nth_child()
+    bench_many_small_trees()
     bench_remove_wide()
     bench_compaction()
     report_memory()

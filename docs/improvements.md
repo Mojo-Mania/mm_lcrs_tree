@@ -1,6 +1,7 @@
 # Suggested improvements
 
-Ordered by effect on the numbers in the README. Improvement 1 is **done**;
+Ordered by effect on the numbers in the README. Improvements 1 and 7 are
+**done**;
 the rest are proposals, and the port otherwise kept the original design apart
 from the five bug fixes in [`migration.md`](migration.md).
 

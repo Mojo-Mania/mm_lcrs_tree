@@ -44,7 +44,7 @@ def assert_consistent[P: Bool, //](tree: LCRSTree[Int, DType.uint32, P]) raises:
                 String("child ", child, " disagrees about its parent"),
             )
             comptime if P:
-                var recorded = Int(tree._prev_sibling[child])
+                var recorded = tree._prev(child)
                 if previous == -1:
                     assert_equal(
                         recorded,
@@ -63,7 +63,7 @@ def assert_consistent[P: Bool, //](tree: LCRSTree[Int, DType.uint32, P]) raises:
                     )
             previous = child
             last = child
-        var cached = Int(tree._last_child[node])
+        var cached = tree._last(node)
         if last == -1:
             assert_equal(
                 cached,
@@ -298,6 +298,36 @@ def test_removed_slots_are_reused() raises:
     var added = tree.add_child(50)
     assert_true(added < before, "a freed slot should have been reused")
     assert_equal(tree.capacity(), before)
+    assert_consistent(tree)
+
+
+def test_remove_is_idempotent() raises:
+    """Removing a node twice, or removing something already freed with its
+    parent's subtree, must not add the slot to the free list twice."""
+    var tree = sample()
+    tree.remove(1)
+    assert_equal(len(tree), 4)
+    tree.remove(1)
+    assert_equal(len(tree), 4)
+    # 4 and 5 went with their parent's subtree.
+    assert_true(tree.is_free(4))
+    tree.remove(4)
+    assert_equal(len(tree), 4)
+    assert_consistent(tree)
+    var added = tree.add_child(50)
+    assert_equal(len(tree), 5)
+    assert_false(tree.is_free(added))
+    assert_consistent(tree)
+
+
+def test_remove_every_node_then_refill() raises:
+    var tree = sample()
+    for node in [1, 2, 3, 4, 5, 6]:
+        tree.remove(node)
+    assert_equal(len(tree), 1)
+    for i in range(20):
+        _ = tree.add_child(i)
+    assert_equal(len(tree), 21)
     assert_consistent(tree)
 
 
@@ -673,10 +703,11 @@ def test_mutations_with_backward_links() raises:
 
 
 def test_backward_links_cost_nothing_when_off() raises:
+    """With the parameter off the link buffer has one region fewer."""
     var plain = sample[False]()
-    assert_equal(len(plain._prev_sibling), 0)
     var tracked = sample[True]()
-    assert_equal(len(tracked._prev_sibling), len(tracked))
+    assert_equal(len(plain._links), plain._capacity * 5)
+    assert_equal(len(tracked._links), tracked._capacity * 6)
 
 
 def test_both_settings_agree_on_shape() raises:
