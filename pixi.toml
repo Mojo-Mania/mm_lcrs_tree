@@ -9,7 +9,7 @@ version = "0.1.0"
 [tasks]
 test = "mojo -I . test/test_lcrs_tree.mojo"
 main = "mojo -I . examples/main.mojo"
-bench = "mojo -I . benchmarks/bench_lcrs_tree.mojo"
+bench = "mojo -D ASSERT=none -I . benchmarks/bench_lcrs_tree.mojo"
 format = "mojo format ./"
 docs = "mojo doc --diagnose-missing-doc-strings -o /dev/null mm_lcrs_tree/"
 

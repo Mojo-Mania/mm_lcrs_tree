@@ -142,9 +142,10 @@ remove sits far along the chain.
 Bushy tree of 37449 nodes (fan-out 8), Apple M-series, nanoseconds per node.
 Reproduce with `pixi run bench`.
 
-Measured in a release build (`-D ASSERT=none`); bounds checks cost this
-structure about 2x on build while being noise for the allocation-heavy
-baselines, so default-mode numbers understate it.
+Measured in a release build, which is what `pixi run bench` passes
+(`-D ASSERT=none`). Bounds checks cost this structure about 2× on build while
+being noise for the allocation-heavy baselines, so default-mode numbers
+understate it.
 
 | Operation | LCRSTree | Nodes owning a `List` | `ArcPointer` nodes |
 | --- | --- | --- | --- |
