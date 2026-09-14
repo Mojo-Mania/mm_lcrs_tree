@@ -1171,7 +1171,10 @@ struct LCRSTree[
         if self._free_count == 0:
             var index = self._count
             debug_assert(
-                index <= Int(Self.Index.MAX),
+                # Compared in the unsigned domain: `Int(Scalar[uint32].MAX)`
+                # wraps to -1, which made this guard fire on the first node
+                # instead of the last.
+                UInt(index) <= UInt(Self.Index.MAX.cast[DType.uint64]()),
                 "LCRSTree: node index type is too narrow for this many nodes",
             )
             self._reserve(index + 1)
